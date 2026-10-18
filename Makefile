@@ -27,7 +27,9 @@ endif
 QUEUE       ?= lockfree
 SAN         ?=
 PYTHON      ?= python3
-DISKSIM_DIR ?= $(firstword $(wildcard ../disk-sim ../Projects/disk-sim))
+# Prefer a live sibling checkout of disk-sim; fall back to the snapshot of
+# its library sources vendored in third_party/ so a fresh clone builds.
+DISKSIM_DIR ?= $(firstword $(wildcard ../disk-sim ../Projects/disk-sim third_party/disk-sim))
 
 ifeq ($(DISKSIM_DIR),)
   $(error disk-sim not found: pass DISKSIM_DIR=/path/to/disk-sim)

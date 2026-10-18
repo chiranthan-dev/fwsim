@@ -45,7 +45,9 @@ static char   g_media[256];
 static void row(const char *exp, const char *variant, const char *metric,
                 double value, const char *unit)
 {
-    fprintf(csv, "%s,%s,%s,%.6g,%s\n", exp, variant, metric, value, unit);
+    /* %.10g: exact for every integer we report, including a 32-bit CRC
+     * (%.6g would round 0xCBF43926 to 3.42178e+09). */
+    fprintf(csv, "%s,%s,%s,%.10g,%s\n", exp, variant, metric, value, unit);
     fflush(csv);
 }
 
