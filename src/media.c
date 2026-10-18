@@ -232,14 +232,26 @@ static void reallocate_pending(media_t *m, uint64_t lba, uint32_t n)
  * cut part-way; *elapsed_ms tells how far it got.
  */
 static int mechanics(media_t *m, uint64_t lba, uint32_t n, disk_op_t op,
-                     disk_timing_t *t, double *elapsed_ms)
+                     int streaming, disk_timing_t *t, double *elapsed_ms)
 {
     disk_request_t req = { .lba = lba, .count = n, .op = op };
-    if (disk_service_request(m->disk, &req, sim_now(m), t) != DISK_OK) {
+    double t_sim = sim_now(m);
+    /* Streaming read-ahead: start the access at the instant the previous
+     * transfer ended, so disk-sim sees the head already over the next
+     * sector (no rotational wait). We still charge the transfer time in
+     * full, which is conservative: a real drive would have done part of
+     * it during the host's think time. */
+    if (streaming && op == DISK_OP_READ && m->last_was_read && lba == m->last_end_lba &&
+        m->last_end_ms <= t_sim)
+        t_sim = m->last_end_ms;
+    if (disk_service_request(m->disk, &req, t_sim, t) != DISK_OK) {
         memset(t, 0, sizeof(*t));
         *elapsed_ms = 0.0;
         return -1;
     }
+    m->last_end_lba = lba + n;
+    m->last_end_ms = t_sim + t->total_ms;
+    m->last_was_read = (op == DISK_OP_READ);
     *elapsed_ms = t->total_ms;
     if (m->time_scale <= 0.0) {
         account(m, t->total_ms);
@@ -293,15 +305,15 @@ static void maybe_transient_flip(media_t *m, uint8_t *rec)
     }
 }
 
-fw_status_t media_read(media_t *m, uint64_t lba, uint32_t n, void *buf,
-                       uint64_t *bad_lba)
+static fw_status_t do_read(media_t *m, uint64_t lba, uint32_t n, void *buf,
+                           uint64_t *bad_lba, int streaming)
 {
     if (!powered(m))
         return FW_ERR_ABORTED;
 
     disk_timing_t t;
     double elapsed;
-    int mr = mechanics(m, lba, n, DISK_OP_READ, &t, &elapsed);
+    int mr = mechanics(m, lba, n, DISK_OP_READ, streaming, &t, &elapsed);
     if (mr < 0)
         return FW_ERR_HARDWARE;
     if (mr == 0)
@@ -353,6 +365,18 @@ fw_status_t media_read(media_t *m, uint64_t lba, uint32_t n, void *buf,
     return FW_OK;
 }
 
+fw_status_t media_read(media_t *m, uint64_t lba, uint32_t n, void *buf,
+                       uint64_t *bad_lba)
+{
+    return do_read(m, lba, n, buf, bad_lba, 0);
+}
+
+fw_status_t media_read_ahead(media_t *m, uint64_t lba, uint32_t n, void *buf,
+                             uint64_t *bad_lba)
+{
+    return do_read(m, lba, n, buf, bad_lba, 1);
+}
+
 static int write_records(media_t *m, uint64_t lba, uint32_t n, const uint8_t *src)
 {
     for (uint32_t done = 0; done < n;) {
@@ -381,7 +405,7 @@ fw_status_t media_write(media_t *m, uint64_t lba, uint32_t n, const void *buf)
 
     disk_timing_t t;
     double elapsed;
-    int mr = mechanics(m, lba, n, DISK_OP_WRITE, &t, &elapsed);
+    int mr = mechanics(m, lba, n, DISK_OP_WRITE, 0, &t, &elapsed);
     if (mr < 0)
         return FW_ERR_HARDWARE;
 

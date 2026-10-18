@@ -142,6 +142,8 @@ typedef struct {
     double        destage_high;       /* start destaging at this dirty fraction */
     double        destage_low;        /* ... and stop at this one              */
     int           destage_sorted;     /* 1 = sort by LBA (elevator), 0 = age order */
+    uint32_t      destage_runs_per_cmd; /* background destage writes allowed
+                                         between two host commands         */
     double        idle_destage_ms;    /* simulated idle time before background
                                          destage; 0 = never destage on idle  */
     uint32_t      idle_destage_batch; /* entries destaged per idle tick      */

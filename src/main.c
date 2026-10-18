@@ -141,8 +141,8 @@ int main(int argc, char **argv)
                (double)res.ops / ((double)res.wall_ns / 1e9 / scale),
                (double)res.ops / ((double)res.wall_ns_durable / 1e9 / scale));
         printf("latency   : avg %.3f ms  p50 %.3f  p95 %.3f  p99 %.3f  max %.3f\n",
-               s.avg_ns / 1e6 * scale, s.p50_ns / 1e6 * scale, s.p95_ns / 1e6 * scale,
-               s.p99_ns / 1e6 * scale, s.max_ns / 1e6 * scale);
+               s.avg_ns / 1e6 / scale, s.p50_ns / 1e6 / scale, s.p95_ns / 1e6 / scale,
+               s.p99_ns / 1e6 / scale, s.max_ns / 1e6 / scale);
         uint64_t rd = st.read_hit_sectors + st.read_miss_sectors;
         printf("cache     : read hit rate %.1f%% (%" PRIu64 "/%" PRIu64 " sectors), "
                "write hits %" PRIu64 ", read-ahead %" PRIu64 " ops\n",

@@ -74,6 +74,12 @@ typedef struct {
 
     uint8_t    *recbuf;        /* bounce buffer for records              */
     size_t      recbuf_sectors;
+
+    /* Where and when the previous media access ended (for read-ahead
+     * streaming, see media_read_ahead). */
+    uint64_t    last_end_lba;
+    double      last_end_ms;
+    int         last_was_read;
 } media_t;
 
 int  media_open(media_t *m, const fw_config_t *cfg, const atomic_int *power_on,
@@ -85,6 +91,13 @@ void media_close(media_t *m);
  * FW_ERR_ABORTED if power is lost during the access. */
 fw_status_t media_read(media_t *m, uint64_t lba, uint32_t n, void *buf,
                        uint64_t *bad_lba);
+
+/* Like media_read, for prefetch. If the range starts exactly where the
+ * previous READ ended, the head never stopped: a real drive keeps its read
+ * channel streaming into the buffer after a sequential read, so there is
+ * no rotational miss - only transfer time is charged. */
+fw_status_t media_read_ahead(media_t *m, uint64_t lba, uint32_t n, void *buf,
+                             uint64_t *bad_lba);
 
 /* Write `n` sectors. If power is lost mid-transfer, only the sectors that
  * had already passed under the head are written (a torn write) and

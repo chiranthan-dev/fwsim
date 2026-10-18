@@ -57,6 +57,9 @@ struct fw {
     int             ra_enabled;
     uint64_t        ra_next_lba;    /* where a sequential stream would continue */
     cache_entry_t **dirty_buf;      /* scratch for destaging                 */
+    uint64_t       *plan;           /* background destage plan: LBAs in the
+                                       order they will be written           */
+    size_t          plan_n, plan_pos;
     uint8_t        *xfer;           /* staging buffer for coalesced writes   */
     uint64_t        capacity;
     uint32_t        ss;             /* sector size                           */
@@ -82,6 +85,7 @@ void fw_config_default(fw_config_t *cfg)
     cfg->destage_high = 0.75;
     cfg->destage_low = 0.50;
     cfg->destage_sorted = 1;
+    cfg->destage_runs_per_cmd = 2;
     cfg->idle_destage_ms = 50.0;
     cfg->idle_destage_batch = 64;
     cfg->read_ahead_sectors = 256;    /* 128 KiB                            */
@@ -116,14 +120,28 @@ static fw_status_t check_range(fw_t *fw, fw_cmd_t *cmd)
 
 /* ---- destaging --------------------------------------------------------------
  *
- * Destaging = writing dirty cache entries back to the media. Three triggers
- * (threshold, FLUSH, idle) share this one function. Two optimisations:
+ * Destaging = writing dirty cache entries back to the media. Two
+ * optimisations apply to every destage:
  *
- *  1. Sort the batch by LBA. Dirty data arrives in random order; writing it
- *     in LBA order turns N random seeks into one sweep across the disk
- *     (the elevator / SCAN idea). The bench measures sorted vs age order.
+ *  1. Sort by LBA. Dirty data arrives in random order; writing it in LBA
+ *     order turns N random seeks into one sweep across the disk (the
+ *     elevator / SCAN idea). The bench measures sorted vs age order.
  *  2. Coalesce adjacent LBAs into one media write: one seek + rotation for
  *     the whole run instead of one per sector.
+ *
+ * And there are two ways to run it:
+ *
+ *  - SYNCHRONOUS (destage / destage_all): FLUSH, shutdown, disabling the
+ *    write cache, or a write that finds every entry dirty. The command
+ *    waits until the data is on the media - that is the whole point.
+ *
+ *  - BACKGROUND (a destage "plan"): when the dirty count crosses the high
+ *    watermark, or the drive goes idle, we pick the oldest dirty entries,
+ *    sort their LBAs once, and then write the plan a few runs at a time,
+ *    re-checking the submission queue between runs. A host command thus
+ *    waits for at most destage_runs_per_cmd media writes, never for a
+ *    whole 1000-sector destage. Real drives interleave background
+ *    destaging with host I/O for the same reason: tail latency.
  */
 
 static int cmp_entry_lba(const void *a, const void *b)
@@ -131,6 +149,27 @@ static int cmp_entry_lba(const void *a, const void *b)
     const cache_entry_t *x = *(cache_entry_t *const *)a;
     const cache_entry_t *y = *(cache_entry_t *const *)b;
     return (x->lba > y->lba) - (x->lba < y->lba);
+}
+
+static int cmp_u64(const void *a, const void *b)
+{
+    uint64_t x = *(const uint64_t *)a, y = *(const uint64_t *)b;
+    return (x > y) - (x < y);
+}
+
+/* Write run[0..n) (consecutive LBAs) as ONE media write. */
+static fw_status_t write_run(fw_t *fw, cache_entry_t **run, size_t n)
+{
+    for (size_t k = 0; k < n; k++)
+        memcpy(fw->xfer + k * fw->ss, run[k]->data, fw->ss);
+    fw_status_t st = media_write(&fw->media, run[0]->lba, (uint32_t)n, fw->xfer);
+    if (st != FW_OK)
+        return st;     /* power cut or write fault: entries stay dirty */
+    for (size_t k = 0; k < n; k++)
+        cache_mark_clean(&fw->cache, run[k]);
+    ctr_add(&fw->ctr.destage_runs, 1);
+    ctr_add(&fw->ctr.destaged_sectors, n);
+    return FW_OK;
 }
 
 static fw_status_t destage(fw_t *fw, size_t max)
@@ -146,18 +185,9 @@ static fw_status_t destage(fw_t *fw, size_t max)
         while (j < n && j - i < FW_MAX_XFER_SECTORS &&
                fw->dirty_buf[j]->lba == fw->dirty_buf[j - 1]->lba + 1)
             j++;
-        for (size_t k = i; k < j; k++)
-            memcpy(fw->xfer + (k - i) * fw->ss, fw->dirty_buf[k]->data, fw->ss);
-
-        fw_status_t st = media_write(&fw->media, fw->dirty_buf[i]->lba,
-                                     (uint32_t)(j - i), fw->xfer);
+        fw_status_t st = write_run(fw, &fw->dirty_buf[i], j - i);
         if (st != FW_OK)
-            return st;     /* power cut or write fault: entries stay dirty */
-
-        for (size_t k = i; k < j; k++)
-            cache_mark_clean(&fw->cache, fw->dirty_buf[k]);
-        ctr_add(&fw->ctr.destage_runs, 1);
-        ctr_add(&fw->ctr.destaged_sectors, j - i);
+            return st;
         i = j;
     }
     update_cache_gauges(fw);
@@ -166,12 +196,58 @@ static fw_status_t destage(fw_t *fw, size_t max)
 
 static fw_status_t destage_all(fw_t *fw)
 {
+    fw->plan_n = fw->plan_pos = 0;   /* everything is about to be clean */
     while (fw->cache.dirty_count > 0) {
         fw_status_t st = destage(fw, fw->cache.dirty_count);
         if (st != FW_OK)
             return st;
     }
     return FW_OK;
+}
+
+static int plan_active(const fw_t *fw)
+{
+    return fw->plan_pos < fw->plan_n;
+}
+
+static void plan_start(fw_t *fw, size_t max)
+{
+    size_t n = cache_collect_dirty(&fw->cache, fw->dirty_buf, max);
+    /* The plan stores LBAs, not entry pointers: by the time we reach an
+     * LBA the host may have overwritten it, a FUA write may have cleaned
+     * it, or the entry may have been evicted and reused for a different
+     * sector. Each step looks the LBA up again and skips it if clean. */
+    for (size_t i = 0; i < n; i++)
+        fw->plan[i] = fw->dirty_buf[i]->lba;
+    if (fw->cfg.destage_sorted)
+        qsort(fw->plan, n, sizeof(*fw->plan), cmp_u64);
+    fw->plan_n = n;
+    fw->plan_pos = 0;
+}
+
+/* Execute up to `runs` media writes of the plan. */
+static void plan_step(fw_t *fw, uint32_t runs)
+{
+    while (runs > 0 && plan_active(fw)) {
+        cache_entry_t *e = cache_lookup(&fw->cache, fw->plan[fw->plan_pos], false);
+        fw->plan_pos++;
+        if (!e || !e->dirty)
+            continue;
+        size_t n = 0;
+        fw->dirty_buf[n++] = e;
+        while (plan_active(fw) && n < FW_MAX_XFER_SECTORS &&
+               fw->plan[fw->plan_pos] == e->lba + n) {
+            cache_entry_t *nx = cache_lookup(&fw->cache, fw->plan[fw->plan_pos], false);
+            if (!nx || !nx->dirty)
+                break;
+            fw->dirty_buf[n++] = nx;
+            fw->plan_pos++;
+        }
+        if (write_run(fw, fw->dirty_buf, n) != FW_OK)
+            return;
+        runs--;
+    }
+    update_cache_gauges(fw);
 }
 
 /* ---- command handlers (the dispatch table targets) ------------------------ */
@@ -365,7 +441,7 @@ static void read_ahead(fw_t *fw, fw_status_t st, uint64_t lba, uint32_t count)
 
     uint64_t bad;
     uint32_t n = (uint32_t)(stop - start);
-    if (media_read(&fw->media, start, n, fw->xfer, &bad) != FW_OK)
+    if (media_read_ahead(&fw->media, start, n, fw->xfer, &bad) != FW_OK)
         return;   /* errors surface if/when the host actually reads it */
     for (uint32_t k = 0; k < n; k++)
         (void)cache_insert(&fw->cache, start + k, fw->xfer + (size_t)k * fw->ss, false);
@@ -375,13 +451,13 @@ static void read_ahead(fw_t *fw, fw_status_t st, uint64_t lba, uint32_t count)
 
 static void threshold_destage(fw_t *fw)
 {
-    if (fw->wce && fw->cache.dirty_count >= fw->high_wm) {
-        /* Hysteresis: destage down to the LOW mark, not just below the
-         * high one. Otherwise every single write would trigger a tiny
+    if (fw->wce && !plan_active(fw) && fw->cache.dirty_count >= fw->high_wm) {
+        /* Hysteresis: plan to destage down to the LOW mark, not just below
+         * the high one. Otherwise every single write would trigger a tiny
          * one-sector destage, and the media would never get a batch large
          * enough to sort into an efficient sweep. */
         ctr_add(&fw->ctr.threshold_destages, 1);
-        (void)destage(fw, fw->cache.dirty_count - fw->low_wm);
+        plan_start(fw, fw->cache.dirty_count - fw->low_wm);
     }
 }
 
@@ -435,11 +511,18 @@ static void process(fw_t *fw, fw_cmd_t *cmd)
         read_ahead(fw, st, lba, count);
     else if (op == FW_OP_WRITE)
         threshold_destage(fw);
+    /* Background destaging gets a bounded slice after every command. */
+    if (plan_active(fw))
+        plan_step(fw, fw->cfg.destage_runs_per_cmd ? fw->cfg.destage_runs_per_cmd : 1);
     update_cache_gauges(fw);
 }
 
 static uint64_t idle_wait_ns(fw_t *fw)
 {
+    /* A destage plan is pending: only peek at the queue, then continue
+     * destaging. */
+    if (plan_active(fw))
+        return 0;
     /* Wake up periodically to notice shutdown even with nothing to do. */
     uint64_t wait = 1000000;  /* 1 ms */
     if (fw->wce && fw->cfg.idle_destage_ms > 0.0 && fw->cache.dirty_count > 0) {
@@ -474,11 +557,18 @@ static void *fw_main(void *arg)
             (void)destage_all(fw);   /* like STANDBY IMMEDIATE */
             break;
         }
-        /* Idle: the host has gone quiet. Use the time to destage a batch,
-         * shrinking the window in which a power cut could lose data. */
+        /* Queue empty and a plan pending: one run at a time, so a command
+         * arriving now waits for at most one media write. */
+        if (plan_active(fw)) {
+            plan_step(fw, 1);
+            continue;
+        }
+        /* Idle: the host has been quiet for idle_destage_ms. Use the time
+         * to destage, shrinking the window in which a power cut could lose
+         * acknowledged data. */
         if (fw->wce && fw->cfg.idle_destage_ms > 0.0 && fw->cache.dirty_count > 0) {
             ctr_add(&fw->ctr.idle_destages, 1);
-            (void)destage(fw, fw->cfg.idle_destage_batch);
+            plan_start(fw, fw->cfg.idle_destage_batch);
         }
     }
     return NULL;
@@ -518,8 +608,9 @@ fw_t *fw_create(const fw_config_t *cfg, int *err)
     if (cache_init(&fw->cache, cfg->cache_entries, fw->ss) != 0)
         goto fail_media;
     fw->dirty_buf = calloc(cfg->cache_entries, sizeof(*fw->dirty_buf));
+    fw->plan = calloc(cfg->cache_entries, sizeof(*fw->plan));
     fw->xfer = malloc((size_t)FW_MAX_XFER_SECTORS * fw->ss);
-    if (!fw->dirty_buf || !fw->xfer)
+    if (!fw->dirty_buf || !fw->plan || !fw->xfer)
         goto fail_cache;
     if (sq_init(&fw->sq, FW_SQ_DEPTH) != 0)
         goto fail_cache;
@@ -549,6 +640,7 @@ fail_sq:
     sq_destroy(&fw->sq);
 fail_cache:
     free(fw->dirty_buf);
+    free(fw->plan);
     free(fw->xfer);
     cache_free(&fw->cache);
 fail_media:
@@ -661,6 +753,7 @@ void fw_destroy(fw_t *fw)
     sq_destroy(&fw->cq);
     sq_destroy(&fw->sq);
     free(fw->dirty_buf);
+    free(fw->plan);
     free(fw->xfer);
     cache_free(&fw->cache);
     media_close(&fw->media);
