@@ -1,0 +1,236 @@
+/*
+ * fwsim.h - public API of the simulated HDD firmware command processor.
+ *
+ * The picture (see README for the diagram):
+ *
+ *   host thread --fw_submit()--> [submission queue] --> firmware thread
+ *        ^                                                   |
+ *        |                                    dispatch table by opcode
+ *        |                                                   v
+ *        |                                       write-back sector cache
+ *        |                                                   |
+ *        |                                       media: disk-sim timing +
+ *        |                                       backing file + CRC-32
+ *   fw_poll() <------------- [completion queue] <------------+
+ *
+ * Command ownership: a fw_cmd_t belongs to the host until fw_submit(),
+ * to the firmware until it is posted to the completion queue, and to the
+ * host again once fw_poll() returns it. The queues' acquire/release
+ * ordering publishes the struct's contents at each hand-off, so the
+ * command struct itself needs no lock or atomics. Touching a command while
+ * the firmware owns it is a data race (TSan will flag it).
+ *
+ * Threading contract: fw_submit() and fw_poll() must be called from ONE
+ * host thread (the lock-free queues are single-producer/single-consumer).
+ */
+#ifndef FWSIM_H
+#define FWSIM_H
+
+#include <stdbool.h>
+#include <stddef.h>
+#include <stdint.h>
+
+#include "disksim.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+/* ---- commands ------------------------------------------------------------ */
+
+typedef enum {
+    FW_OP_IDENTIFY = 0,     /* return drive identity / capabilities      */
+    FW_OP_READ,
+    FW_OP_WRITE,            /* honours FW_CMD_FUA                        */
+    FW_OP_FLUSH,            /* destage all dirty data to media           */
+    FW_OP_SET_FEATURES,     /* e.g. enable/disable the write cache       */
+    FW_OP_COUNT
+} fw_opcode_t;
+
+#define FW_CMD_FUA 0x01     /* Force Unit Access: data on media before ack */
+
+/* NCQ allows 32 outstanding commands, identified by a 5-bit tag. */
+#define FW_MAX_TAGS 32
+
+/* SET_FEATURES feature codes (modelled on ATA SET FEATURES 02h/82h). */
+#define FW_FEAT_WRITE_CACHE 0x02   /* value: 1 = write-back, 0 = write-through */
+#define FW_FEAT_READ_AHEAD  0xAA   /* value: 1 = on, 0 = off                   */
+
+/*
+ * Status codes, modelled loosely on SCSI sense data. Each maps to a sense
+ * key + additional sense code (ASC/ASCQ), see fw_status_sense().
+ */
+typedef enum {
+    FW_OK = 0,
+    FW_ERR_INVALID_OPCODE,  /* ILLEGAL REQUEST   20/00 invalid command op code */
+    FW_ERR_INVALID_FIELD,   /* ILLEGAL REQUEST   24/00 invalid field in CDB    */
+    FW_ERR_INVALID_LBA,     /* ILLEGAL REQUEST   21/00 LBA out of range        */
+    FW_ERR_MEDIUM,          /* MEDIUM ERROR      11/00 unrecovered read error  */
+    FW_ERR_WRITE_FAULT,     /* MEDIUM ERROR      0C/00 write error             */
+    FW_ERR_TAG_IN_USE,      /* ABORTED COMMAND   4E/00 overlapped commands     */
+    FW_ERR_ABORTED,         /* ABORTED COMMAND   00/00 (power loss, shutdown)  */
+    FW_ERR_HARDWARE,        /* HARDWARE ERROR    44/00 internal target failure */
+    FW_STATUS_COUNT
+} fw_status_t;
+
+typedef struct {
+    uint8_t key;    /* sense key */
+    uint8_t asc;    /* additional sense code */
+    uint8_t ascq;   /* additional sense code qualifier */
+} fw_sense_t;
+
+/* Per-command lifecycle. QUEUED is set by fw_submit (host side); ACTIVE
+ * and COMPLETED by the firmware thread. */
+typedef enum {
+    FW_CMD_FREE = 0,
+    FW_CMD_QUEUED,
+    FW_CMD_ACTIVE,
+    FW_CMD_COMPLETED
+} fw_cmd_state_t;
+
+typedef struct fw_cmd {
+    /* --- filled by the host --- */
+    uint8_t     opcode;       /* fw_opcode_t (uint8_t: invalid values are testable) */
+    uint8_t     flags;        /* FW_CMD_FUA                                  */
+    uint8_t     tag;          /* 0 .. FW_MAX_TAGS-1, unique while outstanding */
+    uint64_t    lba;
+    uint32_t    count;        /* sectors                                     */
+    void       *buf;          /* count * sector_size bytes (IDENTIFY: 1 sector) */
+    uint32_t    feature;      /* SET_FEATURES only                            */
+    uint32_t    feature_value;
+    void       *user;         /* host's private pointer, untouched by firmware */
+
+    /* --- filled by the firmware --- */
+    fw_status_t     status;
+    fw_sense_t      sense;
+    uint64_t        err_lba;  /* first failing LBA (sense "information" field) */
+    fw_cmd_state_t  state;
+    uint64_t        t_submit_ns, t_start_ns, t_done_ns;   /* CLOCK_MONOTONIC */
+} fw_cmd_t;
+
+/* IDENTIFY payload (fits in one 512-byte sector, like ATA IDENTIFY). */
+typedef struct {
+    char     model[40];
+    char     serial[20];
+    char     firmware_rev[8];
+    uint64_t capacity_lbas;
+    uint32_t sector_size;
+    uint32_t queue_depth;
+    uint32_t cache_entries;
+    uint8_t  write_cache_enabled;
+    uint8_t  read_ahead_enabled;
+    uint8_t  fua_supported;
+    char     queue_impl[12];      /* "lockfree" or "mutex" */
+} fw_identify_t;
+
+/* ---- configuration -------------------------------------------------------- */
+
+typedef struct {
+    const char   *media_path;     /* backing file holding sector data + CRC   */
+    int           media_create;   /* 1: start from a blank (all-zero) medium  */
+    disk_config_t disk;           /* disk-sim geometry and seek model         */
+    uint64_t      capacity_lbas;  /* 0 = whole disk; else expose only this many */
+
+    /* Wall-clock seconds per simulated second of media time. 1.0 = real
+     * time, 0.02 = a 10 ms seek takes 200 us, 0 = media takes no time
+     * (unit tests). All reported latencies are converted back to drive
+     * time by dividing by this factor. */
+    double        time_scale;
+
+    size_t        cache_entries;      /* sectors of DRAM cache             */
+    int           write_cache;        /* 1 = write-back (WCE), 0 = write-through */
+    double        destage_high;       /* start destaging at this dirty fraction */
+    double        destage_low;        /* ... and stop at this one              */
+    int           destage_sorted;     /* 1 = sort by LBA (elevator), 0 = age order */
+    double        idle_destage_ms;    /* simulated idle time before background
+                                         destage; 0 = never destage on idle  */
+    uint32_t      idle_destage_batch; /* entries destaged per idle tick      */
+    uint32_t      read_ahead_sectors; /* prefetch after a sequential read; 0=off */
+    uint32_t      read_retries;       /* re-reads after a CRC mismatch       */
+    double        fault_read_flip_prob; /* per sector read: transient bit flip */
+    uint64_t      seed;
+} fw_config_t;
+
+/* ---- statistics (a snapshot; safe to call at any time) ------------------- */
+
+typedef struct {
+    uint64_t cmds[FW_OP_COUNT];
+    uint64_t cmd_errors;
+    uint64_t read_hit_sectors, read_miss_sectors;
+    uint64_t write_hit_sectors;          /* writes that overwrote a cached sector */
+    uint64_t destage_runs, destaged_sectors;
+    uint64_t threshold_destages, forced_destages, idle_destages, flushes;
+    uint64_t readahead_ops, readahead_sectors;
+    uint64_t media_reads, media_writes;
+    uint64_t media_sectors_read, media_sectors_written;
+    double   media_busy_ms;              /* simulated mechanical time          */
+    uint64_t crc_errors;                 /* CRC mismatches seen on read        */
+    uint64_t crc_retries;
+    uint64_t crc_recovered;              /* fixed by a retry                   */
+    uint64_t crc_unrecovered;            /* reported as MEDIUM_ERROR           */
+    uint64_t transient_flips;            /* injected read-channel bit flips    */
+    uint64_t reallocations;              /* LBAs moved to spares (disk-sim G-list) */
+    uint64_t torn_writes;                /* media writes cut short by power loss */
+    size_t   cache_dirty;                /* at the time of the snapshot        */
+    size_t   cache_used;
+} fw_stats_t;
+
+typedef struct fw fw_t;
+
+void        fw_config_default(fw_config_t *cfg);
+const char *fw_status_str(fw_status_t st);
+fw_sense_t  fw_status_sense(fw_status_t st);
+const char *fw_opcode_str(uint8_t op);
+const char *fw_queue_impl(void);     /* "lockfree" or "mutex" (build-time) */
+
+/* Create the drive and start the firmware thread. NULL on error; *err gets
+ * a negative errno-style code if err != NULL. */
+fw_t *fw_create(const fw_config_t *cfg, int *err);
+
+/* Hand a command to the firmware (host thread only). Returns FW_OK, or:
+ *   FW_ERR_INVALID_FIELD  tag out of range / NULL cmd
+ *   FW_ERR_TAG_IN_USE     another command with this tag is outstanding
+ *   FW_ERR_ABORTED        the drive is powered off or shutting down
+ * On error the command was NOT queued and no completion will arrive. */
+fw_status_t fw_submit(fw_t *fw, fw_cmd_t *cmd);
+
+/* Next completed command, waiting up to timeout_us (0 = don't wait).
+ * NULL if none. Host thread only. */
+fw_cmd_t *fw_poll(fw_t *fw, uint64_t timeout_us);
+
+/* Submit one command and wait for its completion (no other commands may
+ * be outstanding). Convenience for tests and the reboot verifier. */
+fw_status_t fw_exec(fw_t *fw, fw_cmd_t *cmd);
+
+/* Clean shutdown: finish queued commands, destage the whole cache (like
+ * ATA STANDBY IMMEDIATE), stop the thread. Idempotent. */
+void fw_shutdown(fw_t *fw);
+
+/* Power loss: the firmware stops at the next instruction boundary, even in
+ * the middle of a seek or a multi-sector write (torn write). Nothing is
+ * flushed. Joins the firmware thread; completions already posted before
+ * the cut can still be collected with fw_poll(). */
+void fw_power_cut(fw_t *fw);
+
+/* Free everything. The cache is discarded, never flushed: call
+ * fw_shutdown() first if you want the data. */
+void fw_destroy(fw_t *fw);
+
+void     fw_get_stats(fw_t *fw, fw_stats_t *out);
+uint64_t fw_capacity(const fw_t *fw);
+uint32_t fw_sector_size(const fw_t *fw);
+double   fw_time_scale(const fw_t *fw);
+
+/* Fault injection: flip one bit of the stored record (data or CRC) of
+ * `lba` on the medium. bit = -1 picks a random bit. Persistent: every
+ * later read of that sector fails CRC until it is rewritten. Safe to call
+ * while the firmware runs (it is a separate pwrite on the backing file),
+ * but the effect on an in-flight read of the same sector is undefined -
+ * just as with a real media defect. Returns 0 or -1. */
+int fw_inject_media_bitflip(fw_t *fw, uint64_t lba, int bit);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif

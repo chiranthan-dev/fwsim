@@ -1,0 +1,3 @@
+build/
+*.media
+__pycache__/
