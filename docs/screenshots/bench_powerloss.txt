@@ -1,0 +1,7 @@
+$ ./build/lockfree/fwbench --csv /tmp/fwsim-capture.csv --only powerloss --trials 20
+powerloss (20 trials per mode)
+  wb_noflush     acked/trial   546.0  lost/trial  356.1 (max 384, 20/20 trials)  violations 0  1362.8 IOPS
+  wb_flush       acked/trial   129.4  lost/trial   19.1 (max 31, 20/20 trials)  violations 0  294.8 IOPS
+  wb_fua         acked/trial    99.2  lost/trial    0.0 (max 0, 0/20 trials)  violations 0  182.4 IOPS
+  write_through  acked/trial    82.5  lost/trial    0.0 (max 0, 0/20 trials)  violations 0  176.1 IOPS
+  (11.7 s)

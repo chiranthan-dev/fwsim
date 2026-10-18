@@ -1,0 +1,15 @@
+$ make tsan    # (output filtered to the per-suite summaries)
+test_crc: 53 checks, 0 failures
+test_ring: 15259 checks, 0 failures
+test_cache: 58 checks, 0 failures
+test_dispatch: 829 checks, 0 failures
+test_integrity: 46 checks, 0 failures
+test_powerloss: 281 checks, 0 failures
+run-tests: QUEUE=lockfree SAN=tsan: all passed
+test_crc: 53 checks, 0 failures
+test_ring: 15259 checks, 0 failures
+test_cache: 58 checks, 0 failures
+test_dispatch: 829 checks, 0 failures
+test_integrity: 46 checks, 0 failures
+test_powerloss: 281 checks, 0 failures
+run-tests: QUEUE=mutex SAN=tsan: all passed

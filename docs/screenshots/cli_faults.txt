@@ -1,0 +1,12 @@
+$ ./build/lockfree/fwsim --workload randread --ops 2000 --qd 4 --region 16384 --cache 64 --flip-prob 0.01 --time-scale 0.05
+drive     : FWSIM simulated HDD (disk-sim media), fw 1.0, 199440000 LBAs x 512 B, QD 32, queue=lockfree
+cache     : 64 entries, write-back, read-ahead on, destage LBA-sorted
+workload  : randread, 2000 ops x 8 sectors, QD 4
+time      : drive-time = wall / 0.05
+throughput: 161.2 IOPS acked, 161.2 IOPS incl. final FLUSH
+latency   : avg 24.774 ms  p50 23.700  p95 39.704  p99 47.972  max 67.480
+cache     : read hit rate 0.5% (80/16000 sectors), write hits 0, read-ahead 0 ops
+destage   : 0 runs, 0 sectors (threshold 0, forced 0, idle 0, flush 1)
+media     : 1990 reads, 0 writes, busy 11001.5 ms (simulated)
+integrity : 165 CRC errors, 165 recovered by retry, 0 unrecovered, 167 injected flips
+errors    : 0 commands failed

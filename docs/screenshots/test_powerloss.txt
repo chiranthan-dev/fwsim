@@ -1,0 +1,13 @@
+$ ./build/lockfree/tests/test_powerloss
+test_powerloss (queue=lockfree)
+  test_write_back_without_flush_loses_acked_writes ok
+  test_flush_makes_writes_durable              ok
+  test_fua_and_write_through_never_lose        ok
+    (torn write: 927 of 2048 sectors reached the media)
+  test_torn_write_is_a_clean_prefix            ok
+    wb_noflush     12 trials: 3208 acked writes, 2070 lost
+    wb_flush       12 trials: 1438 acked writes, 105 lost
+    wb_fua         12 trials: 1536 acked writes, 0 lost
+    write_through  12 trials: 1750 acked writes, 0 lost
+  test_randomized_trials                       ok
+test_powerloss: 443 checks, 0 failures
