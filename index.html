@@ -1,0 +1,139 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>fwsim live drive</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&amp;family=IBM+Plex+Sans:wght@400;500;600;700&amp;display=swap" rel="stylesheet">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div class="wrap">
+
+<header class="top">
+  <div class="brand">
+    <svg width="34" height="34" viewBox="0 0 34 34" aria-hidden="true"><circle cx="17" cy="17" r="15" fill="none" stroke="currentColor" stroke-width="2"/><circle cx="17" cy="17" r="4" fill="currentColor"/><line x1="30" y1="30" x2="20" y2="12" stroke="var(--accent)" stroke-width="2.5" stroke-linecap="round"/></svg>
+    <div>
+      <h1>fwsim · live drive</h1>
+      <p class="sub">Simulated HDD firmware on disk-sim media · <span id="geo">7,200 rpm · 2 MiB cache</span></p>
+    </div>
+  </div>
+  <div class="actions">
+    <span id="status" class="pill pill-idle" role="status"><span class="dot"></span><span id="status-text">CONNECTING</span></span>
+    <button type="button" id="btn-run" class="btn btn-primary">Run workload</button>
+    <button type="button" id="btn-stop" class="btn">Stop</button>
+    <button type="button" id="btn-flush" class="btn">FLUSH cache</button>
+    <button type="button" id="btn-plug" class="btn btn-danger">Pull the plug</button>
+    <button type="button" id="btn-reset" class="btn btn-quiet">Wipe disk</button>
+  </div>
+</header>
+
+<section class="card controls" aria-label="Workload controls">
+  <label>Workload
+    <select id="c-workload">
+      <option value="0">Random 4K writes</option>
+      <option value="1">Random 4K reads</option>
+      <option value="2">Sequential 64K reads</option>
+      <option value="3">Sequential 32K writes</option>
+      <option value="4">Mixed 70/30, hot set</option>
+    </select>
+  </label>
+  <label>Cache mode
+    <select id="c-mode">
+      <option value="0">Write-back</option>
+      <option value="1">Write-through</option>
+      <option value="2">Write-back + FUA on every write</option>
+      <option value="3">Write-back + FLUSH every 32 writes</option>
+    </select>
+  </label>
+  <label>Queue depth
+    <select id="c-qd"><option>1</option><option selected>4</option><option>8</option><option>32</option></select>
+  </label>
+  <label>Destage order
+    <select id="c-sorted"><option value="1">LBA-sorted (elevator)</option><option value="0">Age order</option></select>
+  </label>
+  <label>LBA region
+    <select id="c-region"><option value="0">Whole disk (~100 GB)</option><option value="1">First 1 GiB</option><option value="2">First 32 MiB</option></select>
+  </label>
+  <label>Read bit-flip rate
+    <select id="c-flip"><option value="0">None</option><option value="0.001">0.1% per sector</option><option value="0.01">1% per sector</option><option value="0.05">5% per sector</option></select>
+  </label>
+  <label>Motor speed on screen
+    <select id="c-speed">
+      <option value="1">Real time (7,200 rpm)</option>
+      <option value="4">1/4 speed (1,800 rpm)</option>
+      <option value="10" selected>1/10 speed (720 rpm)</option>
+      <option value="40">1/40 speed (180 rpm)</option>
+    </select>
+  </label>
+  <p class="hint" id="hint">Settings apply when you press Run.</p>
+</section>
+
+<div class="row">
+  <section class="card disk" aria-label="Drive animation">
+    <div class="card-head">
+      <h2>Platter, top view</h2>
+      <span class="mono muted" id="headinfo">head parked</span>
+    </div>
+    <canvas id="platter" role="img" aria-label="Live animation of the spinning platter, the sectors' cache state and the actuator arm moving the head to each access"></canvas>
+    <ul class="legend">
+      <li><span class="sw sw-dirty"></span>Dirty: acknowledged, only in cache</li>
+      <li><span class="sw sw-clean"></span>On media, CRC protected</li>
+      <li><span class="sw sw-read"></span>Being read</li>
+      <li><span class="sw sw-lost"></span>Lost at power cut</li>
+      <li><span class="sw sw-empty"></span>Never written</li>
+    </ul>
+    <div class="mini3">
+      <div class="mini"><span>Seek</span><b class="mono" id="t-seek">–</b></div>
+      <div class="mini"><span>Rotation wait</span><b class="mono" id="t-rot">–</b></div>
+      <div class="mini"><span>Transfer</span><b class="mono" id="t-xfer">–</b></div>
+    </div>
+    <p class="note" id="motor-note">Timings are disk-sim's, per access, in drive time.</p>
+  </section>
+
+  <section class="side" aria-label="Statistics">
+    <div class="tiles">
+      <div class="tile"><span class="tl">IOPS (drive time)</span><b id="s-iops">–</b><span class="ts" id="s-iops-sub">last 2 s</span></div>
+      <div class="tile"><span class="tl">Latency p50</span><b><span id="s-p50">–</span><small> ms</small></b><span class="ts" id="s-avg">avg –</span></div>
+      <div class="tile"><span class="tl">Latency p99</span><b><span id="s-p99">–</span><small> ms</small></b><span class="ts" id="s-p95">p95 –</span></div>
+      <div class="tile"><span class="tl">Read hit rate</span><b id="s-hit">–</b><span class="ts" id="s-busy">media busy –</span></div>
+    </div>
+
+    <div class="card meter-card">
+      <div class="row-between"><span class="label-strong">Write cache</span><span class="mono muted" id="m-text">0 / 4,096 dirty sectors</span></div>
+      <div class="meter" role="meter" aria-label="Dirty sectors in the write cache" aria-valuemin="0" aria-valuemax="4096" aria-valuenow="0" id="m-meter">
+        <div class="fill" id="m-fill"></div><i class="mark" style="left:50%"></i><i class="mark" style="left:75%"></i>
+      </div>
+      <div class="row-between small muted"><span>0</span><span>low 50% · high 75% → destage</span><span>100%</span></div>
+      <div class="counts mono small" id="m-counts">destage runs 0 · commands 0 · acked writes 0</div>
+    </div>
+
+    <div class="card chart-card">
+      <div class="row-between"><span class="label-strong">Latency per command</span><span class="muted small">recent commands · ms, log scale</span></div>
+      <canvas id="lat" role="img" aria-label="Latency of recent commands on a log scale"></canvas>
+    </div>
+
+    <div class="card verify-card" id="verify" aria-live="polite">
+      <span class="label-strong">Power-loss check</span>
+      <div class="muted small" id="verify-text">Pull the plug during a write workload. The firmware stops mid-seek, the DRAM cache is discarded, the drive reboots and every acknowledged write is read back.</div>
+    </div>
+  </section>
+</div>
+
+<div class="row">
+  <section class="card tags-card" aria-label="NCQ tags">
+    <div class="row-between"><span class="label-strong">NCQ tags 0–31</span><span class="muted small">free · queued · active</span></div>
+    <div class="tags" id="tags"></div>
+  </section>
+  <section class="card log-card" aria-label="Firmware log">
+    <span class="label-strong">Firmware log</span>
+    <ol class="log mono" id="log"></ol>
+  </section>
+</div>
+
+<footer class="foot muted small">fwsim · simulated firmware, not real drive code · every number above is measured live from the running simulator.</footer>
+</div>
+<script src="app.js"></script>
+</body>
+</html>
