@@ -123,6 +123,48 @@ typedef struct {
     char     queue_impl[12];      /* "lockfree" or "mutex" */
 } fw_identify_t;
 
+/* ---- tracing ----------------------------------------------------------------
+ *
+ * An optional observer for visualisation (the live web dashboard) and
+ * debugging. When fw_config_t.trace is set, the firmware calls it ON THE
+ * FIRMWARE THREAD for every media access, command start/finish and CRC
+ * event. The callback must be quick and must not call back into the
+ * fw_* API (it would deadlock or race); copy what it needs and return.
+ * With trace == NULL nothing is computed and nothing is called.
+ */
+typedef enum {
+    FW_TRACE_MEDIA = 0,     /* a media access is starting (timing known)   */
+    FW_TRACE_CMD_START,     /* firmware dequeued a command (ACTIVE)        */
+    FW_TRACE_CMD_DONE,      /* completion about to be posted (COMPLETED)   */
+    FW_TRACE_CRC            /* a CRC mismatch was resolved (or not)        */
+} fw_trace_kind_t;
+
+typedef enum {
+    FW_IO_HOST = 0,         /* serving a host READ/WRITE                   */
+    FW_IO_DESTAGE,          /* writing dirty cache data back               */
+    FW_IO_READAHEAD         /* prefetch after a sequential read            */
+} fw_io_reason_t;
+
+typedef struct {
+    fw_trace_kind_t kind;
+    double      sim_ms;     /* simulated drive time of the event           */
+    uint8_t     opcode;     /* CMD_*: the command's opcode                  */
+    uint8_t     tag;        /* CMD_*                                        */
+    uint8_t     flags;      /* CMD_*: FW_CMD_FUA                            */
+    uint8_t     is_write;   /* MEDIA                                        */
+    uint8_t     reason;     /* MEDIA: fw_io_reason_t                        */
+    uint8_t     wce;        /* CMD_DONE: write cache was enabled            */
+    uint8_t     has_chs;    /* cyl/head/sector/spt below are valid          */
+    fw_status_t status;     /* CMD_DONE                                     */
+    int         recovered;  /* CRC: 1 = fixed by a retry, 0 = MEDIUM ERROR  */
+    uint64_t    lba;        /* first sector (all kinds)                     */
+    uint32_t    count;
+    uint32_t    cyl, head, sector, spt;  /* where `lba` physically lives   */
+    double      seek_ms, rot_ms, xfer_ms; /* MEDIA: disk-sim's breakdown   */
+} fw_trace_t;
+
+typedef void (*fw_trace_fn)(void *ctx, const fw_trace_t *ev);
+
 /* ---- configuration -------------------------------------------------------- */
 
 typedef struct {
@@ -151,6 +193,8 @@ typedef struct {
     uint32_t      read_retries;       /* re-reads after a CRC mismatch       */
     double        fault_read_flip_prob; /* per sector read: transient bit flip */
     uint64_t      seed;
+    fw_trace_fn   trace;              /* optional observer, see above      */
+    void         *trace_ctx;
 } fw_config_t;
 
 /* ---- statistics (a snapshot; safe to call at any time) ------------------- */
@@ -222,6 +266,9 @@ void     fw_get_stats(fw_t *fw, fw_stats_t *out);
 uint64_t fw_capacity(const fw_t *fw);
 uint32_t fw_sector_size(const fw_t *fw);
 double   fw_time_scale(const fw_t *fw);
+/* Simulated drive time now, estimated from the wall clock since power-on
+ * (ms). Safe from any thread. 0 when time_scale is 0. */
+double   fw_sim_now_ms(const fw_t *fw);
 
 /* Fault injection: flip one bit of the stored record (data or CRC) of
  * `lba` on the medium. bit = -1 picks a random bit. Persistent: every

@@ -4,6 +4,8 @@
  * and the write-back cache policies (FLUSH, FUA, write-through,
  * SET_FEATURES, destage triggers, read-ahead, clean shutdown).
  */
+#include <stdatomic.h>
+
 #include "check.h"
 #include "clock.h"
 #include "pattern.h"
@@ -427,6 +429,51 @@ static void test_clean_shutdown_persists(void)
     fw_destroy(fw);
 }
 
+/* ---- tracing ------------------------------------------------------------------ */
+
+/* The trace callback runs on the firmware thread; the test thread reads the
+ * counters afterwards, so they are atomics (TSan checks this). */
+static atomic_int tr_start, tr_done, tr_host_writes, tr_destages, tr_bad_chs;
+
+static void count_trace(void *ctx, const fw_trace_t *ev)
+{
+    (void)ctx;
+    switch (ev->kind) {
+    case FW_TRACE_CMD_START: atomic_fetch_add(&tr_start, 1); break;
+    case FW_TRACE_CMD_DONE:  atomic_fetch_add(&tr_done, 1); break;
+    case FW_TRACE_MEDIA:
+        if (ev->is_write && ev->reason == FW_IO_HOST)
+            atomic_fetch_add(&tr_host_writes, 1);
+        if (ev->is_write && ev->reason == FW_IO_DESTAGE)
+            atomic_fetch_add(&tr_destages, 1);
+        if (!ev->has_chs || ev->spt == 0 || ev->sector >= ev->spt)
+            atomic_fetch_add(&tr_bad_chs, 1);
+        break;
+    default: break;
+    }
+}
+
+static void test_trace_events(void)
+{
+    fw_config_t cfg;
+    test_config(&cfg, path);
+    cfg.trace = count_trace;
+    fw_t *fw = open_drive(&cfg);
+    write_pattern(fw, 64, 8, 1, FW_CMD_FUA);     /* media write, reason HOST */
+    write_pattern(fw, 4096, 8, 1, 0);            /* cache only */
+    CHECK_EQ(simple(fw, mkcmd(FW_OP_FLUSH, 0, 0, 0, NULL)), FW_OK);  /* destage */
+    fw_stats_t st;
+    sync_stats(fw, &st);
+    fw_shutdown(fw);                              /* thread joined: reads are final */
+    CHECK_EQ(atomic_load(&tr_start), 4);          /* 2 writes, FLUSH, IDENTIFY */
+    CHECK_EQ(atomic_load(&tr_done), 4);
+    CHECK_EQ(atomic_load(&tr_host_writes), 1);
+    CHECK_EQ(atomic_load(&tr_destages), 1);
+    CHECK_EQ(atomic_load(&tr_bad_chs), 0);
+    CHECK(fw_sim_now_ms(fw) == 0.0);              /* time_scale 0 */
+    fw_destroy(fw);
+}
+
 int main(void)
 {
     tmp_media(path, sizeof(path), "dispatch");
@@ -443,6 +490,7 @@ int main(void)
     RUN_TEST(test_unsorted_destage_is_also_correct);
     RUN_TEST(test_read_ahead);
     RUN_TEST(test_clean_shutdown_persists);
+    RUN_TEST(test_trace_events);
     unlink(path);
     return test_summary("test_dispatch");
 }

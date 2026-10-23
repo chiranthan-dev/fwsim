@@ -81,6 +81,8 @@ TESTS     = test_crc test_ring test_cache test_dispatch test_integrity test_powe
 TEST_BINS = $(TESTS:%=$(BUILD)/tests/%)
 CLI       = $(BUILD)/fwsim
 BENCH     = $(BUILD)/fwbench
+UI        = $(BUILD)/fwsim-ui
+UI_PORT  ?= 8080
 
 # Sanitizer runtime options: fail loudly on the first report.
 export ASAN_OPTIONS  = detect_leaks=1:abort_on_error=1:halt_on_error=1
@@ -96,11 +98,17 @@ else
   RUN =
 endif
 
-.PHONY: all lib test asan tsan bench run-tests clean
+.PHONY: all lib test asan tsan bench run-tests clean ui run-ui
 # Keep object files that make would otherwise treat as intermediates.
 .SECONDARY:
 
-all: $(CLI) $(BENCH)
+all: $(CLI) $(BENCH) $(UI)
+
+ui: $(UI)
+
+# The live web dashboard: open http://localhost:$(UI_PORT) in a browser.
+run-ui: $(UI)
+	./$(UI) --port $(UI_PORT) --static ui/static
 
 lib: $(FW_LIB) $(DS_LIB)
 
@@ -122,6 +130,9 @@ $(CLI): $(BUILD)/src/main.o $(FW_LIB) $(DS_LIB)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 $(BENCH): $(BUILD)/bench/bench.o $(FW_LIB) $(DS_LIB)
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+$(UI): $(BUILD)/ui/server.o $(FW_LIB) $(DS_LIB)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
 $(BUILD)/tests/%: $(BUILD)/tests/%.o $(FW_LIB) $(DS_LIB)
@@ -164,5 +175,5 @@ bench:
 clean:
 	rm -rf build
 
--include $(FW_OBJS:.o=.d) $(DS_OBJS:.o=.d) $(BUILD)/src/main.d $(BUILD)/bench/bench.d \
+-include $(FW_OBJS:.o=.d) $(DS_OBJS:.o=.d) $(BUILD)/src/main.d $(BUILD)/bench/bench.d $(BUILD)/ui/server.d \
          $(TEST_BINS:=.d)

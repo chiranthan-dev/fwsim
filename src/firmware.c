@@ -162,7 +162,9 @@ static fw_status_t write_run(fw_t *fw, cache_entry_t **run, size_t n)
 {
     for (size_t k = 0; k < n; k++)
         memcpy(fw->xfer + k * fw->ss, run[k]->data, fw->ss);
+    fw->media.io_reason = FW_IO_DESTAGE;
     fw_status_t st = media_write(&fw->media, run[0]->lba, (uint32_t)n, fw->xfer);
+    fw->media.io_reason = FW_IO_HOST;
     if (st != FW_OK)
         return st;     /* power cut or write fault: entries stay dirty */
     for (size_t k = 0; k < n; k++)
@@ -418,12 +420,12 @@ static const fw_handler_t dispatch[FW_OP_COUNT] = {
  * (no seek, almost no rotational wait), so the next read is a cache hit.
  * Done AFTER the completion is posted, so it never delays the host.
  */
-static void read_ahead(fw_t *fw, fw_status_t st, uint64_t lba, uint32_t count)
+static void read_ahead(fw_t *fw, fw_status_t cmd_st, uint64_t lba, uint32_t count)
 {
     int sequential = (lba == fw->ra_next_lba);
     fw->ra_next_lba = lba + count;
     if (!sequential || !fw->ra_enabled || fw->cfg.read_ahead_sectors == 0 ||
-        st != FW_OK)
+        cmd_st != FW_OK)
         return;
 
     uint64_t start = lba + count;
@@ -441,7 +443,10 @@ static void read_ahead(fw_t *fw, fw_status_t st, uint64_t lba, uint32_t count)
 
     uint64_t bad;
     uint32_t n = (uint32_t)(stop - start);
-    if (media_read_ahead(&fw->media, start, n, fw->xfer, &bad) != FW_OK)
+    fw->media.io_reason = FW_IO_READAHEAD;
+    fw_status_t st = media_read_ahead(&fw->media, start, n, fw->xfer, &bad);
+    fw->media.io_reason = FW_IO_HOST;
+    if (st != FW_OK)
         return;   /* errors surface if/when the host actually reads it */
     for (uint32_t k = 0; k < n; k++)
         (void)cache_insert(&fw->cache, start + k, fw->xfer + (size_t)k * fw->ss, false);
@@ -463,12 +468,33 @@ static void threshold_destage(fw_t *fw)
 
 /* ---- the main loop ----------------------------------------------------------- */
 
+static void trace_cmd(fw_t *fw, fw_trace_kind_t kind, const fw_cmd_t *cmd, fw_status_t st)
+{
+    fw_trace_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.kind = kind;
+    ev.sim_ms = fw->media.sim_ms;
+    ev.opcode = cmd->opcode;
+    ev.tag = cmd->tag;
+    ev.flags = cmd->flags;
+    ev.wce = (uint8_t)fw->wce;
+    ev.status = st;
+    ev.lba = cmd->lba;
+    ev.count = cmd->count;
+    ev.is_write = cmd->opcode == FW_OP_WRITE;
+    if (cmd->opcode == FW_OP_READ || cmd->opcode == FW_OP_WRITE)
+        media_locate(&fw->media, cmd->lba, &ev);
+    fw->cfg.trace(fw->cfg.trace_ctx, &ev);
+}
+
 static void complete(fw_t *fw, fw_cmd_t *cmd, fw_status_t st)
 {
     cmd->status = st;
     cmd->sense = fw_status_sense(st);
     cmd->state = FW_CMD_COMPLETED;
     cmd->t_done_ns = now_ns();
+    if (fw->cfg.trace)
+        trace_cmd(fw, FW_TRACE_CMD_DONE, cmd, st);
     if (cmd->opcode < FW_OP_COUNT)
         ctr_add(&fw->ctr.cmds[cmd->opcode], 1);
     if (st != FW_OK)
@@ -487,6 +513,8 @@ static void process(fw_t *fw, fw_cmd_t *cmd)
     cmd->state = FW_CMD_ACTIVE;
     cmd->t_start_ns = now_ns();
     cmd->err_lba = 0;
+    if (fw->cfg.trace)
+        trace_cmd(fw, FW_TRACE_CMD_START, cmd, FW_OK);
 
     /* Copy what background work needs: after complete() the host owns cmd. */
     uint8_t op = cmd->opcode;
@@ -798,6 +826,15 @@ void fw_get_stats(fw_t *fw, fw_stats_t *o)
 uint64_t fw_capacity(const fw_t *fw)    { return fw->capacity; }
 uint32_t fw_sector_size(const fw_t *fw) { return fw->ss; }
 double   fw_time_scale(const fw_t *fw)  { return fw->cfg.time_scale; }
+
+double fw_sim_now_ms(const fw_t *fw)
+{
+    /* t0_ns and time_scale are written once in media_open, before the
+     * firmware thread starts, and never again: safe to read anywhere. */
+    if (fw->cfg.time_scale <= 0.0)
+        return 0.0;
+    return (double)(now_ns() - fw->media.t0_ns) / 1e6 / fw->cfg.time_scale;
+}
 
 int fw_inject_media_bitflip(fw_t *fw, uint64_t lba, int bit)
 {

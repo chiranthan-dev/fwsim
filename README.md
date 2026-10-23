@@ -72,6 +72,7 @@ write-through mode, the media write happens *before* the completion.
 | [src/powerloss.c](src/powerloss.c) | Power-loss trial: write, cut, reboot, verify |
 | [src/workload.c](src/workload.c) | Closed-loop host workload generator at a fixed queue depth |
 | [bench/bench.c](bench/bench.c), [bench/plot.py](bench/plot.py) | Every experiment → CSV → markdown + PNG |
+| [ui/server.c](ui/server.c), [ui/static/](ui/static) | Live web dashboard: C server (SSE) + canvas animation of platter and arm |
 | [tests/](tests/) | Unit + integration tests (rings, cache, CRC, dispatch, integrity, power loss) |
 | [third_party/disk-sim](third_party/disk-sim) | Snapshot of the disk-sim media library (used if no sibling checkout exists) |
 | [LEARNING.md](LEARNING.md), [INTERVIEW.md](INTERVIEW.md) | Guided walkthrough; 25 interview questions with model answers |
@@ -108,6 +109,9 @@ make bench            # ~2.5 min: results/results.csv, results.md, *.png
 make QUEUE=mutex      # build with the mutex/condvar queue instead
 ```
 ```bash
+make run-ui           # live web dashboard on http://localhost:8080
+```
+```bash
 ./build/lockfree/fwsim --workload mixed --ops 2000 --qd 4 --region 65536 --time-scale 0.25
 ```
 
@@ -115,6 +119,47 @@ The CLI prints IDENTIFY data, throughput, latency percentiles, cache hit
 rate, destage, media and integrity counters for one workload. Run
 `fwsim --help` to see the options (`--write-through`, `--fua`,
 `--no-readahead`, `--unsorted-destage`, `--flip-prob P`, ...).
+
+### Live dashboard
+
+```bash
+make run-ui
+```
+
+Then open **http://localhost:8080** (from WSL, Windows browsers reach it on
+the same address). `fwsim-ui` ([ui/server.c](ui/server.c)) is a small C
+server, still with no dependencies beyond pthreads and POSIX sockets. It runs
+the real firmware and streams every media access and command to the page
+over Server-Sent Events. The page ([ui/static/](ui/static)) draws:
+
+- **The platter, spinning at the simulated rpm.** Its angle is
+  `frac(t / rev_ms)` in drive time, the same rotational model disk-sim uses,
+  so a target sector reaches the head exactly when disk-sim's rotational wait
+  ends.
+- **The actuator arm.** For every access it swings to the real cylinder over
+  disk-sim's seek time, with an accelerate–decelerate–settle profile. A ring
+  marks the target sector while it rotates round, and the sectors light up
+  as they pass under the head.
+- **Sector state, live:** orange is acknowledged but only in the DRAM cache,
+  teal is on the media, red is lost at a power cut. These come from the
+  firmware's own trace events: write-back acknowledgements, destage writes,
+  and the post-reboot verification.
+- **Live stats:** IOPS and p50/p95/p99 in drive time, read hit rate, media
+  busy %, the dirty-cache meter with its 50%/75% watermarks, the latency of
+  recent commands, the 32 NCQ tags (free, queued, active), a firmware log,
+  and CRC errors.
+- **Pull the plug:** cuts power mid-whatever-it-is-doing. The spindle coasts
+  down, the head parks, the drive reboots, every acknowledged block is read
+  back, and the card reports how many were lost and how many durability
+  promises were broken (always 0).
+
+Motor speed: real time (7,200 rpm, 120 revolutions per second), or slowed
+to 1/4, 1/10 or 1/40 so each seek and rotational wait is visible. The firmware
+itself runs at the chosen speed (`time_scale`), so the animation is the
+firmware's actual behaviour, not a replay. Switching the cache mode sends a
+real SET FEATURES command. The server binds to 127.0.0.1 only.
+`bash ui/tsan_smoke.sh` (after `make SAN=tsan ui`) drives the server through
+runs, FLUSH, two power cuts and a wipe under ThreadSanitizer: 0 warnings.
 
 ### How time works
 

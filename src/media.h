@@ -80,6 +80,14 @@ typedef struct {
     uint64_t    last_end_lba;
     double      last_end_ms;
     int         last_was_read;
+
+    /* Tracing (see fwsim.h). io_reason is set by the firmware before each
+     * media call so the trace can say WHY the head is moving. */
+    fw_trace_fn trace;
+    void       *trace_ctx;
+    uint8_t     io_reason;
+    uint32_t    nzones;
+    disk_zone_t zones[DISK_MAX_ZONES];
 } media_t;
 
 int  media_open(media_t *m, const fw_config_t *cfg, const atomic_int *power_on,
@@ -105,5 +113,8 @@ fw_status_t media_read_ahead(media_t *m, uint64_t lba, uint32_t n, void *buf,
 fw_status_t media_write(media_t *m, uint64_t lba, uint32_t n, const void *buf);
 
 int media_inject_bitflip(media_t *m, uint64_t lba, int bit);
+
+/* Fill ev->cyl/head/sector/spt for `lba` (sets has_chs). Firmware thread. */
+void media_locate(const media_t *m, uint64_t lba, fw_trace_t *ev);
 
 #endif

@@ -150,6 +150,14 @@ int media_open(media_t *m, const fw_config_t *cfg, const atomic_int *power_on,
     m->rng = cfg->seed ^ 0x6D656469615F726Eull;
     atomic_init(&m->inject_rng, cfg->seed ^ 0x696E6A6563740000ull);
 
+    m->trace = cfg->trace;
+    m->trace_ctx = cfg->trace_ctx;
+    m->io_reason = FW_IO_HOST;
+    m->nzones = 0;
+    for (uint32_t z = 0; z < info.num_zones && z < DISK_MAX_ZONES; z++)
+        if (disk_get_zone(m->disk, z, &m->zones[z]) == DISK_OK)
+            m->nzones = z + 1;
+
     m->recbuf_sectors = RECBUF_SECTORS;
     m->recbuf = malloc(m->recbuf_sectors * m->rec_size);
     if (!m->recbuf)
@@ -224,6 +232,62 @@ static void reallocate_pending(media_t *m, uint64_t lba, uint32_t n)
     }
 }
 
+/* ---- tracing -------------------------------------------------------------- */
+
+void media_locate(const media_t *m, uint64_t lba, fw_trace_t *ev)
+{
+    disk_chs_t chs;
+    ev->has_chs = 0;
+    if (lba >= m->capacity || disk_lba_to_chs(m->disk, lba, &chs) != DISK_OK)
+        return;
+    ev->cyl = chs.cylinder;
+    ev->head = chs.head;
+    ev->sector = chs.sector;
+    ev->spt = 0;
+    for (uint32_t z = 0; z < m->nzones; z++) {
+        const disk_zone_t *zn = &m->zones[z];
+        if (chs.cylinder >= zn->first_cylinder &&
+            chs.cylinder < zn->first_cylinder + zn->num_cylinders) {
+            ev->spt = zn->sectors_per_track;
+            break;
+        }
+    }
+    if (ev->spt == 0)          /* spare area: outside the user zones */
+        ev->spt = m->nzones ? m->zones[m->nzones - 1].sectors_per_track : 1000;
+    ev->has_chs = 1;
+}
+
+static void trace_media(media_t *m, uint64_t lba, uint32_t n, int is_write,
+                        double t_sim, const disk_timing_t *t)
+{
+    fw_trace_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.kind = FW_TRACE_MEDIA;
+    ev.sim_ms = t_sim;
+    ev.is_write = (uint8_t)is_write;
+    ev.reason = m->io_reason;
+    ev.lba = lba;
+    ev.count = n;
+    ev.seek_ms = t->seek_ms;
+    ev.rot_ms = t->rotate_ms;
+    ev.xfer_ms = t->transfer_ms;
+    media_locate(m, lba, &ev);
+    m->trace(m->trace_ctx, &ev);
+}
+
+static void trace_crc(media_t *m, uint64_t lba, int recovered)
+{
+    fw_trace_t ev;
+    memset(&ev, 0, sizeof(ev));
+    ev.kind = FW_TRACE_CRC;
+    ev.sim_ms = m->sim_ms;
+    ev.lba = lba;
+    ev.count = 1;
+    ev.recovered = recovered;
+    media_locate(m, lba, &ev);
+    m->trace(m->trace_ctx, &ev);
+}
+
 /* ---- I/O ----------------------------------------------------------------- */
 
 /*
@@ -252,6 +316,8 @@ static int mechanics(media_t *m, uint64_t lba, uint32_t n, disk_op_t op,
     m->last_end_lba = lba + n;
     m->last_end_ms = t_sim + t->total_ms;
     m->last_was_read = (op == DISK_OP_READ);
+    if (m->trace)
+        trace_media(m, lba, n, op == DISK_OP_WRITE, t_sim, t);
     *elapsed_ms = t->total_ms;
     if (m->time_scale <= 0.0) {
         account(m, t->total_ms);
@@ -352,8 +418,12 @@ static fw_status_t do_read(media_t *m, uint64_t lba, uint32_t n, void *buf,
             }
             if (ok) {
                 ctr_add(&m->ctr->crc_recovered, 1);
+                if (m->trace)
+                    trace_crc(m, s, 1);
                 continue;
             }
+            if (m->trace)
+                trace_crc(m, s, 0);
             /* Never return data we know is wrong: report the LBA instead. */
             ctr_add(&m->ctr->crc_unrecovered, 1);
             pending_add(m, s);
