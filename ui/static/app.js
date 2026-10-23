@@ -405,11 +405,41 @@ function updateMotorNote() {
 
 /* ---- the event stream ------------------------------------------------------------------------------------ */
 
+/* Replay mode: on GitHub Pages (or with ?replay) there is no firmware to
+ * talk to, so the page plays back demo-events.json - a real session recorded
+ * from fwsim-ui by ui/record.py - with its original timing, through exactly
+ * the same handler as the live event stream. */
+const REPLAY = /[?&]replay\b/.test(location.search) || location.hostname.endsWith('github.io') ||
+               location.protocol === 'file:';
+
 function connect() {
+  if (REPLAY) { replay(); return; }
   const es = new EventSource('/events');
   es.onmessage = (m) => {
     let ev;
     try { ev = JSON.parse(m.data); } catch { return; }
+    handle(ev);
+  };
+  es.onerror = () => { setPhase('idle'); $('status-text').textContent = 'RECONNECTING'; };
+}
+
+async function replay() {
+  for (const id of ['btn-run', 'btn-stop', 'btn-flush', 'btn-plug', 'btn-reset']) $(id).disabled = true;
+  $('hint').textContent = 'Replay of a real recorded session (scripted: write-back run, power cut, write-through run, power cut). Run "make run-ui" locally to drive the live firmware yourself.';
+  let data;
+  try { data = await (await fetch('demo-events.json')).json(); } catch { $('status-text').textContent = 'NO RECORDING'; return; }
+  const evs = data.events, start = performance.now();
+  let i = 0;
+  const pump = () => {
+    const t = performance.now() - start;
+    while (i < evs.length && evs[i][0] <= t) handle(evs[i++][1]);
+    if (i < evs.length) setTimeout(pump, Math.max(0, Math.min(50, evs[i][0] - t)));
+    else setTimeout(() => location.reload(), 5000);       // loop
+  };
+  pump();
+}
+
+function handle(ev) {
     switch (ev.type) {
       case 'hello':
         G = ev;
@@ -421,6 +451,7 @@ function connect() {
         break;
       case 'state':
         scale = ev.scale; setPhase(ev.phase); updateMotorNote();
+        if (REPLAY) for (const id of ['btn-run', 'btn-stop', 'btn-flush', 'btn-plug', 'btn-reset']) $(id).disabled = true;
         powered = ev.phase !== 'off' && ev.phase !== 'verifying';
         break;
       case 'media':
@@ -464,8 +495,6 @@ function connect() {
         $('verify-text').textContent = 'Pull the plug during a write workload to see which acknowledged writes survive.';
         break;
     }
-  };
-  es.onerror = () => { setPhase('idle'); $('status-text').textContent = 'RECONNECTING'; };
 }
 
 function showVerify(v) {

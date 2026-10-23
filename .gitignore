@@ -1,3 +1,7 @@
 build/
 *.media
 __pycache__/
+docs/frames/
+# Private study guides: kept locally, not published
+LEARNING.md
+INTERVIEW.md

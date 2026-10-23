@@ -15,6 +15,17 @@ access takes; fwsim decides *which* accesses happen, *when*, and *what the
 host is told*. Together they are one simulated drive: disk-sim is the head
 and platters, fwsim is the controller firmware.
 
+![fwsim live dashboard: write-back run, then the plug is pulled](docs/dashboard.gif)
+
+*The live dashboard on a real session: random 4K writes with write-back
+caching at 1/10 speed (the platter spins at 720 rpm on screen). Orange
+sectors are acknowledged but only in the DRAM cache; the arm destages them
+to the platter in LBA order, turning them teal. Then the plug is pulled: the
+spindle coasts down, the drive reboots, and every acknowledged block is read
+back. 336 of 560 were lost (red), 0 durability promises broken.
+**[Watch the recorded session online](https://chiranthan-dev.github.io/fwsim/)**,
+or run it live yourself (see [Run it in WSL](#run-it-in-wsl)).*
+
 > **This is simulated firmware, not real drive code.** It runs as a user-space
 > program on Linux, uses a file as its platters, and models timing rather than
 > controlling hardware. The concepts (NCQ tags, write-back caching, FUA/FLUSH
@@ -75,7 +86,6 @@ write-through mode, the media write happens *before* the completion.
 | [ui/server.c](ui/server.c), [ui/static/](ui/static) | Live web dashboard: C server (SSE) + canvas animation of platter and arm |
 | [tests/](tests/) | Unit + integration tests (rings, cache, CRC, dispatch, integrity, power loss) |
 | [third_party/disk-sim](third_party/disk-sim) | Snapshot of the disk-sim media library (used if no sibling checkout exists) |
-| [LEARNING.md](LEARNING.md), [INTERVIEW.md](INTERVIEW.md) | Guided walkthrough; 25 interview questions with model answers |
 
 ## Build and run
 
@@ -109,7 +119,7 @@ make bench            # ~2.5 min: results/results.csv, results.md, *.png
 make QUEUE=mutex      # build with the mutex/condvar queue instead
 ```
 ```bash
-make run-ui           # live web dashboard on http://localhost:8080
+make run-ui           # live web dashboard on http://localhost:8080 (see "Run it in WSL")
 ```
 ```bash
 ./build/lockfree/fwsim --workload mixed --ops 2000 --qd 4 --region 65536 --time-scale 0.25
@@ -120,14 +130,48 @@ rate, destage, media and integrity counters for one workload. Run
 `fwsim --help` to see the options (`--write-through`, `--fua`,
 `--no-readahead`, `--unsorted-destage`, `--flip-prob P`, ...).
 
+### Run it in WSL
+
+From scratch on Windows 10/11:
+
+1. **Install WSL with Ubuntu** (once). Run this in PowerShell, then restart
+   if it asks you to:
+   ```powershell
+   wsl --install -d Ubuntu
+   ```
+2. **Open Ubuntu** (Start menu → Ubuntu) and install the toolchain. Python
+   and matplotlib are only needed for `make bench`'s charts:
+   ```bash
+   sudo apt update && sudo apt install -y build-essential git python3-matplotlib
+   ```
+3. **Get the code.** Clone it into the Linux file system (`~`), not `/mnt/c`,
+   because builds are much faster there:
+   ```bash
+   cd ~ && git clone https://github.com/chiranthan-dev/fwsim.git && cd fwsim
+   ```
+4. **Build and test:**
+   ```bash
+   make && make test
+   ```
+5. **Start the live dashboard:**
+   ```bash
+   make run-ui
+   ```
+   It prints `fwsim-ui: http://localhost:8080`. Leave it running.
+6. **Open http://localhost:8080 in your normal Windows browser.** WSL
+   forwards `localhost` to Windows automatically. Pick a workload, cache mode
+   and motor speed, then press **Run workload**. Press **Pull the plug** at
+   any moment to cut power, and watch the drive reboot and report which
+   acknowledged writes survived.
+7. Stop the server with **Ctrl+C** in the Ubuntu window. To use another
+   port: `make run-ui UI_PORT=9000`.
+
+If the dashboard doesn't load from Windows, open `http://127.0.0.1:8080`
+instead, or check that nothing else is using port 8080.
+
 ### Live dashboard
 
-```bash
-make run-ui
-```
-
-Then open **http://localhost:8080** (from WSL, Windows browsers reach it on
-the same address). `fwsim-ui` ([ui/server.c](ui/server.c)) is a small C
+![dashboard right after a power cut](docs/screenshots/dashboard.png) `fwsim-ui` ([ui/server.c](ui/server.c)) is a small C
 server, still with no dependencies beyond pthreads and POSIX sockets. It runs
 the real firmware and streams every media access and command to the page
 over Server-Sent Events. The page ([ui/static/](ui/static)) draws:
@@ -152,6 +196,17 @@ over Server-Sent Events. The page ([ui/static/](ui/static)) draws:
   down, the head parks, the drive reboots, every acknowledged block is read
   back, and the card reports how many were lost and how many durability
   promises were broken (always 0).
+
+**Online replay.** GitHub Pages can only serve static files, so it can't run
+the C firmware. The [online copy](https://chiranthan-dev.github.io/fwsim/)
+is the same page in replay mode: it plays back
+[ui/static/demo-events.json](ui/static/demo-events.json), a real session
+that [ui/record.py](ui/record.py) recorded from `fwsim-ui` (every event with
+its original timing), through the same event handler the live stream uses.
+Open `http://localhost:8080/?replay` to see the replay locally. The README
+animation consists of real screenshots of that replay, captured with headless
+Edge/Chrome ([docs/capture_dashboard.mjs](docs/capture_dashboard.mjs)) and
+assembled by [docs/make_gif.py](docs/make_gif.py).
 
 Motor speed: real time (7,200 rpm, 120 revolutions per second), or slowed
 to 1/4, 1/10 or 1/40 so each seek and rotational wait is visible. The firmware
