@@ -255,6 +255,7 @@ function frame() {
     ctx.fillStyle = 'rgba(15,17,21,0.35)'; ctx.fillRect(0, 0, W, H);
   }
   drawLatency();
+  drawVib();
   flushLog();
 }
 
@@ -313,6 +314,55 @@ function drawLatency() {
   latCtx.stroke();
 }
 
+/* ---- vibration monitor -------------------------------------------------------------------- */
+
+/* One bar per classifier window (every 16 ms of drive time): height = RMS
+ * of the window on a log scale, colour = the class the int8 model chose.
+ * Threshold interrupts (P1 / P3) are white ticks along the top. */
+const VCOL = ['#5b6475', '#ef4444', '#f59e0b', '#60a5fa'];
+const VNAME = ['quiet', 'shock', 'vibration', 'tap'];
+const vibCv = $('vib'), vibCtx = vibCv.getContext('2d');
+const vibs = [];
+let vibDirty = true, lastVibCls = -2;
+function drawVib() {
+  if (!vibDirty) return;
+  vibDirty = false;
+  const r = vibCv.getBoundingClientRect(), d = window.devicePixelRatio || 1;
+  if (vibCv.width !== Math.round(r.width * d)) { vibCv.width = Math.round(r.width * d); vibCv.height = Math.round(r.height * d); }
+  const w = r.width, h = r.height;
+  vibCtx.setTransform(d, 0, 0, d, 0, 0);
+  vibCtx.clearRect(0, 0, w, h);
+  vibCtx.font = '10px IBM Plex Mono, monospace'; vibCtx.fillStyle = '#9aa3b2';
+  const lo = Math.log10(1), hi = Math.log10(5000);
+  const y = (v) => h - 4 - (Math.log10(Math.max(v, 1)) - lo) / (hi - lo) * (h - 12);
+  for (const v of [10, 100, 1000]) {
+    vibCtx.strokeStyle = '#222733'; vibCtx.lineWidth = 1;
+    vibCtx.beginPath(); vibCtx.moveTo(40, y(v)); vibCtx.lineTo(w, y(v)); vibCtx.stroke();
+    vibCtx.fillText(v + ' mg', 0, y(v) + 3);
+  }
+  const n = 240, bw = (w - 42) / n;
+  vibs.forEach((e, i) => {
+    const x = 42 + i * bw;
+    if (e.cls < 0) { vibCtx.fillStyle = '#e5e7eb'; vibCtx.fillRect(x, 0, Math.max(1, bw * 0.5), 6); return; }
+    vibCtx.fillStyle = VCOL[e.cls];
+    const top = y(e.rms);
+    vibCtx.fillRect(x, top, Math.max(1, bw - 0.5), h - 4 - top);
+  });
+}
+function onVib(ev) {
+  vibs.push(ev); if (vibs.length > 240) vibs.shift(); vibDirty = true;
+  if (ev.cls < 0) return;
+  const pill = $('v-class');
+  pill.className = 'vpill c' + ev.cls;
+  pill.textContent = `${VNAME[ev.cls]} · ${ev.conf}%`;
+  $('v-state').textContent = ev.inh ? 'writes INHIBITED' : ev.prot ? 'settle + verify on' : 'writing normally';
+  if (ev.cls !== lastVibCls) {
+    lastVibCls = ev.cls;
+    const act = ev.cls === 1 ? ' → inhibit + retry' : ev.cls === 2 ? ' → extra settle + verify-after-write' : '';
+    log(`VIB     ${VNAME[ev.cls]} (${ev.conf}%, rms ${ev.rms} mg)${act}`, ev.cls === 1 ? 'x' : ev.cls === 2 ? 'w' : '');
+  }
+}
+
 /* ---- log ---------------------------------------------------------------------------------- */
 
 const logLines = [];
@@ -363,6 +413,10 @@ function onStats(s) {
   $('m-text').textContent = `${s.dirty.toLocaleString()} / ${s.cache.toLocaleString()} dirty sectors`;
   $('m-counts').textContent = `destage runs ${s.destage_runs.toLocaleString()} · commands ${s.cmds.toLocaleString()} · acked writes ${s.acked.toLocaleString()} · CRC errors ${s.crc} (recovered ${s.crc_ok}, failed ${s.crc_bad})`;
   setTags(s.tags);
+  if (s.vwin !== undefined) {
+    $('v-counts').textContent = `windows ${s.vwin.toLocaleString()} (q/s/v/t ${s.vcls.join('/')}) · threshold IRQs ${s.virq} · inhibits ${s.vinh}, stalled ${fmt(s.vstall, 0)} ms (needless ${fmt(s.vfalse, 0)}) · verified writes ${s.vverify}, rewrites ${s.vrewrite} · off-track sectors ${s.offtrack}`;
+    if (!s.vwin && !s.virq) { $('v-class').className = 'vpill'; $('v-class').textContent = 'off'; }
+  }
 }
 
 /* ---- state / buttons -------------------------------------------------------------------------------- */
@@ -387,7 +441,7 @@ $('btn-run').addEventListener('click', () => {
   const q = new URLSearchParams({
     workload: $('c-workload').value, mode: $('c-mode').value, qd: $('c-qd').value,
     sorted: $('c-sorted').value, region: $('c-region').value, flip: $('c-flip').value,
-    scale: $('c-speed').value
+    scale: $('c-speed').value, env: $('c-env').value, policy: $('c-policy').value
   });
   api('start?' + q.toString());
 });
@@ -425,7 +479,7 @@ function connect() {
 
 async function replay() {
   for (const id of ['btn-run', 'btn-stop', 'btn-flush', 'btn-plug', 'btn-reset']) $(id).disabled = true;
-  $('hint').textContent = 'Replay of a real recorded session (scripted: write-back run, power cut, write-through run, power cut). Run "make run-ui" locally to drive the live firmware yourself.';
+  $('hint').textContent = 'Replay of a real recorded session (scripted: write-back run, power cut, write-through run, power cut, then write-through in a synthetic vibration environment with the Edge AI hybrid write protection). Run "make run-ui" locally to drive the live firmware yourself.';
   let data;
   try { data = await (await fetch('demo-events.json')).json(); } catch { $('status-text').textContent = 'NO RECORDING'; return; }
   const evs = data.events, start = performance.now();
@@ -473,6 +527,9 @@ function handle(ev) {
         break;
       case 'stats':
         syncClock(ev.t); onStats(ev);
+        break;
+      case 'vib':
+        onVib(ev);
         break;
       case 'power':
         if (!ev.on) {

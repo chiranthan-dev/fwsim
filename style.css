@@ -105,6 +105,13 @@ select {
 .counts { color: var(--text-2); }
 .chart-card { display: flex; flex-direction: column; gap: 10px; }
 #lat { width: 100%; height: 150px; display: block; }
+.vib-card { display: flex; flex-direction: column; gap: 8px; }
+#vib { width: 100%; height: 90px; display: block; }
+.vpill { font: 600 12px/1 'IBM Plex Mono', monospace; padding: 4px 8px; border-radius: 999px;
+         background: #2a2f3a; color: var(--text-2); text-transform: uppercase; }
+.vpill.c0 { background: #2a2f3a; color: #cbd5e1; } .vpill.c1 { background: #ef4444; color: #111; }
+.vpill.c2 { background: #f59e0b; color: #111; }    .vpill.c3 { background: #60a5fa; color: #111; }
+.vlegend i { display: inline-block; width: 10px; height: 10px; border-radius: 2px; margin: 0 3px 0 6px; vertical-align: -1px; }
 .verify-card { display: flex; flex-direction: column; gap: 8px; }
 .verify-card p { margin: 0; line-height: 1.5; }
 .verify-big { font-size: 30px; font-weight: 700; }
