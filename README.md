@@ -2,7 +2,7 @@
 
 `fwsim` is the firmware layer of a hard drive, written in C11 with pthreads.
 A host submits NCQ-style tagged commands (IDENTIFY, READ, WRITE with FUA,
-FLUSH, SET FEATURES) into a submission queue. A dedicated firmware thread
+FLUSH, SET FEATURES, and optionally SMART READ) into a submission queue. A dedicated firmware thread
 decodes them through an opcode dispatch table, serves them from a write-back
 LRU sector cache, and moves data to and from "platters". Each sector on the
 platters carries a CRC-32. Completions with SCSI-style sense data go back
@@ -120,6 +120,12 @@ make QUEUE=mutex      # build with the mutex/condvar queue instead
 ```
 ```bash
 make run-ui           # live web dashboard on http://localhost:8080 (see "Run it in WSL")
+```
+```bash
+make smart-demo       # SMART risk timeline demo (no data needed)
+```
+```bash
+make bench-smart      # SMART model end to end on Backblaze data (see "SMART failure prediction")
 ```
 ```bash
 ./build/lockfree/fwsim --workload mixed --ops 2000 --qd 4 --region 65536 --time-scale 0.25
@@ -402,6 +408,135 @@ fw_shutdown(fw);                       /* destage everything, stop */
 fw_destroy(fw);
 ```
 
+## SMART failure prediction
+
+**Problem.** Drives usually give warning before they die: sectors get
+reallocated, reads become uncorrectable, unreadable sectors pile up as
+"pending". SMART exposes those counters. The question is whether a small
+model *inside the firmware* can turn them into a better "replace me soon"
+signal than the classic rule, *flag the drive if any of SMART 5, 187, 188,
+197 or 198 is above zero*.
+
+The target: **will this drive fail within the next 30 days?**
+
+**Data.** Backblaze Drive Stats Q1 + Q2 2026 (public daily SMART snapshots
+with a failure flag). That is 61.9 M drive-days from 359,507 data HDDs
+(Toshiba, Seagate, HGST, WDC; 4 TB and up), 2,552 of which failed. It is
+processed in chunks: one daily CSV at a time, then DuckDB out of core. The
+raw data is not in git; [tools/smart/README.md](tools/smart/README.md) has
+the exact download steps.
+
+```mermaid
+flowchart LR
+    A["Backblaze Drive Stats<br/>Q1+Q2 2026, 62M drive-days"] --> B["ingest.py<br/>daily CSV to parquet,<br/>HDDs only"]
+    B --> C["features.py (DuckDB)<br/>7/30-day deltas,<br/>30-day label"]
+    C --> D["train.py<br/>serial + time splits<br/>rule vs LR vs GBT, per drive"]
+    D --> E["export.py<br/>int16 weights, zero points,<br/>sigmoid LUT"]
+    E --> F["src/smart_model.h"]
+    G["fwsim counters<br/>reallocations, pending,<br/>unrecovered CRC, POH, temp"] --> H["src/smart.c<br/>attributes + 32-day ring<br/>integer inference"]
+    F --> H
+    H --> I["FW_OP_SMART_READ<br/>attribute table, risk,<br/>flag, sense 01/5D/00"]
+```
+
+**How it is evaluated.**
+- **Per drive, not per row.** A drive's score is its highest daily score in
+  the test window. The false-alarm rate is the share of healthy drives
+  flagged at least once.
+- **Two leakage-safe splits.**
+  - *Serial split*: 80/20 by drive serial number.
+  - *Time split*: train on Feb–Mar, test on May. A 30-day gap means no
+    training label can see the test window.
+- **Never accuracy.** Predicting "never fails" would already be 99.8%
+  accurate on the time split.
+
+The deployed threshold is chosen for 1% false alarms on the *training*
+period, never on the test set.
+
+**Results (time split: 350,500 test drives, 843 failures).**
+
+| Model | PR-AUC | Recall at 1% false alarms |
+|---|---:|---:|
+| Baseline rule, graded (sum of the five raw counters) | 0.033 | 12.2% |
+| **Logistic regression, 17 deployable features (in fwsim)** | **0.189** | **52.9%** |
+| Logistic regression, + vendor-normalised values | 0.196 | 52.6% |
+| Gradient-boosted trees (60 × depth 3) | 0.208 | 60.1% |
+
+- **The rule as written** ("any raw > 0") catches 76.5% of failures, but it
+  flags **8.5%** of healthy drives: 29,805 false alarms for 645 hits.
+  **At that same 8.5% the model only reaches 77.8%. At the rule's own
+  operating point the model does not meaningfully beat it.** The gain is
+  at low false-alarm rates: at 1%, the model catches 4× as many failures
+  as the graded rule.
+- **The deployed threshold**, chosen on training data, gives 53.9% recall
+  at 1.08% false alarms on the test month (precision 10.7%).
+- **Serial split:** recall at 1% false alarms 61.4% (model) vs 11.0%
+  (graded baseline).
+- **By manufacturer:** the model helps most on Seagate (64.6% vs 19.9%) and
+  Toshiba (51.8% vs 42.3%). It is level with the baseline on HGST and WDC,
+  and slightly *below* it for both on the serial split.
+- **GBT vs this model:** GBT is better (60.1% vs 52.9%), but it would mean
+  shipping 896 tree nodes instead of 17 weights.
+
+![Per-drive precision-recall, time split](results/smart/pr_time.png)
+
+Full tables (both splits, per manufacturer and per Toshiba model, bootstrap
+CIs): [results/smart/results.md](results/smart/results.md). Model details
+and failure modes: [docs/model-card.md](docs/model-card.md).
+
+**In the firmware.** `src/smart.c` keeps SMART attributes from counters the
+simulator already had:
+
+| Attribute | Source in fwsim |
+|---|---|
+| 5 (reallocated) | G-list reallocations |
+| 187 (reported uncorrectable) | reads that failed every CRC retry |
+| 197 (pending) | unreadable LBAs awaiting rewrite |
+| 9 (power-on hours) | simulated time |
+| 194 (temperature) | an input |
+
+A 32-entry ring holds one sample per simulated day, which gives the 7- and
+30-day deltas. Inference is integer-only (no FPU, no malloc):
+
+- **C vs Python:** on all 10.8 M test drive-days the C model equals the
+  Python integer reference bit for bit. Its flag agrees with the float
+  scikit-learn model in 100% of rows (max probability error 0.0011).
+- **Why int16 weights:** int8 was measured first and cost up to 3.8
+  percentage points of probability.
+- **Cost:** 602 bytes of tables; about 15 ns per inference (~275 ns with feature computation; varies run to run) on the host CPU
+  (not drive-controller timing).
+
+`FW_OP_SMART_READ` returns the attribute table, the risk and the flag. While
+the flag is tripped it completes with the SCSI informational exception
+RECOVERED ERROR 5D/00. SMART is **off by default**: IDENTIFY advertises it,
+and `SET FEATURES 0xD8` or `fw_config_t.smart_enable` turns it on. With it
+off, every existing test and every deterministic CLI/bench output is
+identical to before.
+
+**Deployment demo, synthetic counters.** `make smart-demo` runs a
+20,000-hour drive for 8 simulated weeks. From day 14 a growing scratch adds
+grown defects and unrecoverable reads. Risk stays at 0.03% while the drive
+is healthy and the flag trips on day 21. *The defects are scripted. The
+demo shows the plumbing works; the accuracy claims come only from the
+Backblaze test set.*
+
+![SMART risk timeline in the deployment demo](results/smart/demo_timeline.png)
+
+**Reproduce:** `tools/smart/download.sh tools/smart/data`, then
+`make bench-smart` (about 10 minutes; details in
+[tools/smart/README.md](tools/smart/README.md)).
+
+**Limitations.**
+- **One fleet, one half-year.** Backblaze's workload, cooling and
+  replacement policy are baked in, and drift is already visible: recall at
+  1% false alarms falls from 61% on the serial split to 53% two months
+  later.
+- **Silent failures cap recall.** 23.5% of the test-month failures never
+  showed any of the five counters.
+- **The simulator's counters are synthetic.** 188 and 198 are always 0 in
+  fwsim, and temperature is an input, not a thermal model.
+- **Host timing is not drive timing.** A Cortex-R class controller is
+  slower, and the model would run once per SMART poll, not per I/O.
+
 ## Design decisions
 
 - **One firmware thread owns the cache, the media and the disk-sim handle.**
@@ -448,8 +583,8 @@ fw_destroy(fw);
 
 ## Testing
 
-`make test` runs six test programs, twice (once per queue implementation),
-plus five end-to-end CLI runs. `make asan` and `make tsan` run the same
+`make test` runs seven test programs, twice (once per queue implementation),
+plus five end-to-end CLI runs and the SMART demo. `make asan` and `make tsan` run the same
 thing under the sanitizers, and both report nothing. I sanity-checked that
 TSan in this environment does catch a deliberately racy program.
 
@@ -461,6 +596,15 @@ TSan in this environment does catch a deliberately racy program.
 | `test_dispatch` | IDENTIFY, invalid opcodes + sense, range/overflow validation, tag collision, all 32 tags in flight, FLUSH, FUA, write-through, SET FEATURES, threshold and forced destage, unsorted destage, read-ahead, clean shutdown persistence |
 | `test_integrity` | persistent flip → retries → MEDIUM_ERROR at the exact LBA, CRC-field flip, reallocation on rewrite, transient flips recovered with zero silent corruption, misdirected write caught |
 | `test_powerloss` | deterministic contracts per mode, torn write is a clean prefix, randomized trials per mode with zero durability violations |
+| `test_smart` | attribute mapping from the firmware counters (5/187/197/9/194), history ring wrap-around and idle gaps, exported model bit-exact vs the Python reference (510 Backblaze test vectors, ≤ 1 pp vs float), SMART_READ invalid fields → 05/24/00, disabled → 05/2C/00, failure predicted → 01/5D/00 |
+
+The Python side has its own tests (`python -m pytest tools/smart/tests`):
+- no serial in both splits;
+- time-split labels never reach the test window;
+- the 30-day label and the 7/30-day deltas on a synthetic dataset run through the real DuckDB SQL;
+- the baseline rule;
+- deterministic training with a fixed seed;
+- the integer transform and quantisation bounds.
 
 ## Limitations
 

@@ -1,0 +1,16 @@
+{
+  "rows": 10779155,
+  "c_vs_python_int_logit_identical_pct": 100.0,
+  "c_vs_python_int_risk_identical_pct": 100.0,
+  "c_vs_float_flag_agree_pct": 100.0,
+  "flag_disagreements": 0,
+  "max_abs_logit_diff_vs_float": 0.004153493103615347,
+  "mean_abs_logit_diff_vs_float": 0.0019819141153302744,
+  "max_abs_prob_diff_vs_float": 0.0010925812778429522,
+  "flagged_rows_c": 92293,
+  "flagged_rows_float": 92293,
+  "weight_bits": 16,
+  "int8_max_abs_logit_diff_vs_float": 0.2148890067010214,
+  "int8_max_abs_prob_diff_vs_float": 0.03755458002536094,
+  "int8_flag_agree_pct": 99.99624274815605
+}
