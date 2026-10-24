@@ -1,0 +1,11 @@
+metric,value,unit
+features,17,count
+model_bytes,602,bytes
+weight_bits,16,bits
+weights_bytes,34,bytes
+zp_bytes,34,bytes
+lut_bytes,514,bytes
+state_bytes,1608,bytes
+host_ns_logit,9.621,ns/call
+host_ns_logit_risk,14.275,ns/call
+host_ns_features_logit_risk,216.535,ns/call

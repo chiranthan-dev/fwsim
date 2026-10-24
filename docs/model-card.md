@@ -1,143 +1,181 @@
-# Model card: fwsim vibration classifier
+# Model card: fwsim SMART failure predictor
 
-A four-class classifier that runs inside the simulated drive firmware on
-windows of accelerometer samples and tells the write path what kind of
-mechanical disturbance is happening, so it can pick a response.
+A logistic regression that estimates, from a drive's own SMART counters,
+the probability that the drive fails within the next 30 days. It is trained
+offline in Python on Backblaze Drive Stats and deployed into fwsim's
+simulated firmware as integer-only C (`src/smart_model.h`), where
+`FW_OP_SMART_READ` reports it.
+
+All numbers below come from [results/smart/results.md](../results/smart/results.md)
+(`make bench-smart`). This is a student project on public data, not a
+validated product.
+
+## Intended use
+
+- **Use:** a fleet-maintenance signal. Flag a drive for proactive
+  replacement or data migration before it fails.
+- **Not for:** warranty or RMA decisions, any per-drive guarantee, or drives
+  unlike the training population (SSDs, consumer drives, other fleets).
+
+## Data
 
 | | |
 |---|---|
-| Classes | `quiet`, `shock`, `vibration` (sustained rotational vibration), `tap` (harmless periodic tapping) |
-| Input | 9 integer features of the last N = 64 samples at 1 kHz (64 ms), computed every 16 samples |
-| Deployed model | int8 MLP, 9 → 16 (ReLU) → 4, 368 bytes of parameters (`src/edgeai/model_data.h`) |
-| Also exported | decision trees (N = 64/128/256) and MLPs for N = 128/256; the trees are deployed for 128/256 |
-| Inference | integer only: int8 weights, int32 accumulators, no malloc, no floating point (`make nofloat` checks it) |
-| Training code | `tools/edgeai/train.py` (scikit-learn 1.9.1), export `tools/edgeai/export.py` |
-| Data | **synthetic only** (`src/periph/env_sim.h`); no real accelerometer data was used anywhere |
+| Source | Backblaze Drive Stats, public daily SMART snapshots per drive with a failure flag |
+| Quarters | Q1 2026 + Q2 2026 (2026-01-01 .. 2026-06-30), 181 daily files |
+| Population | data HDDs of 4 TB and up from Toshiba, Seagate, HGST and WDC. SSDs and boot drives are removed in `ingest.py` |
+| Size | 61,856,799 drive-days, 359,507 drives, 2,552 failed drives |
+| Processing | each daily CSV is streamed out of the zip and reduced to the needed columns (parquet); DuckDB builds features out of core (spills to disk, ~5 GB RAM) |
 
-## Intended use and non-use
+Download steps: [tools/smart/README.md](../tools/smart/README.md). Raw data
+is not committed.
 
-Intended for the simulator: to compare write-protection policies (none /
-fixed threshold / classifier / hybrid) under a documented, frozen physical
-model, and as a worked example of an Edge-AI pipeline on firmware (fixed-point
-features, int8 export, C/Python agreement checks).
+## Label
 
-Not suitable for a real drive as is. The data, the sensor (an invented
-single-axis part) and every physical constant are illustrative. A real
-deployment would need recorded accelerometer data from real chassis, the
-real servo's error-sensitivity curve, and re-validation on that hardware.
+`y = 1` on a drive-day if the drive's failure record falls within the next
+30 days, today included (`fail_date - date` in 0..29). Rows after a failure
+are dropped.
 
-## Data generation
+A row is only used if its label is fully observed (date ≤ last day − 30) and
+it has 30 days of history before it (date ≥ first day + 30). That leaves the
+eligible window **2026-01-31 .. 2026-05-31**.
 
-`env_sim` generates the in-plane acceleration at 4 kHz as a sequence of
-labelled segments with randomised, deliberately overlapping parameters:
+## Features
 
-| class | what is generated | overlaps with |
-|---|---|---|
-| quiet | fan hum 0-8 mg at 40-120 Hz + 1 mg noise floor | weak vibration |
-| shock | 1-3 damped sinusoids per segment, 400-6000 mg (log-uniform), 60-320 Hz, tau 3-25 ms, + a 2.3x mode | hard taps (280-320 Hz, 400-1500 mg, tau 3-4 ms) |
-| vibration | 2-4 drifting sinusoids at 30-300 Hz + band noise, total RMS 15-200 mg, 60 ms fades | quiet (low RMS), shock (overlaid shocks) |
-| tap | impulses every 150-600 ms, 200-1500 mg, 280-480 Hz, tau 0.5-4 ms | small shocks |
+All features are integers computed from raw counters with an integer
+transform. The firmware computes exactly the same values (`smart_features()`
+in `src/smart.c`).
 
-The accelerometer model averages 4 physics samples per output sample, adds
-2 mg RMS Gaussian sensor noise and rounds to int16 (1 mg/LSB). Training data
-goes through exactly that path (`accel_model_digitize`), and through the C
-feature code, via `edgeai_cli dataset`.
+| Feature | Definition |
+|---|---|
+| `lg_raw_A`, A ∈ {5, 187, 188, 197, 198} | `lg(x)` = integer approximation of 16·log2(1+x): top-bit position ×16 + the next 4 bits. Monotone, shift-and-add only |
+| `lg_d7_A`, `lg_d30_A` | `lg` of the counter's growth over the last 7 / 30 days: today minus the oldest snapshot within [today−N, today]. Negative growth (e.g. pending sectors reallocated) counts as 0 |
+| `lg_poh` | `lg(SMART 9 raw)`, power-on hours |
+| `temp` | SMART 194 raw, clipped to 0..80 °C |
 
-**Labels.** Per sample: `shock` while a shock's envelope is above
-min(10% of peak, 100 mg); else `vibration` inside a vibration segment; else
-`tap` while a tap is ringing; else `quiet`. Per window, by priority: shock if
-≥ 4 shock samples, else vibration if ≥ half, else tap if ≥ 2 tap samples,
-else quiet. A window that still contains the tail of a shock is "shock".
+That is 17 **deployable** features. The "all features" comparison models
+also get the vendor-normalised values of the seven attributes and two
+"attribute reported" flags (187, 188). Those are vendor-specific scalings,
+so they are left out of the model that ships in firmware.
 
-**Splits (by recording seed, never by window).** 200 recordings of 30 s from
-the `train` mix (25% of segments of each class): seeds 1-120 train, 121-160
-validation, 161-200 test. Windows overlap (hop 16), so splitting windows at
-random would leak near-copies of test windows into training; whole
-recordings on one side of the split prevent that. The system benchmark uses
-yet other seeds (5001-5030) and four other mixes.
+Attribute meanings: 5 reallocated sectors, 187 reported uncorrectable
+errors, 188 command timeouts, 197 current pending sectors, 198 offline
+uncorrectable, 9 power-on hours, 194 temperature.
 
-Test-split windows (N = 64): 44,055 quiet, 2,043 shock, 24,969 vibration,
-3,813 tap. Shock and tap are rare by nature, so the tree uses
-`class_weight="balanced"` and the MLP is trained on a class-balanced
-oversample of the training split.
+## Training
 
-## Features (`src/edgeai/features.c`, all fixed point)
+- Every positive drive-day plus a deterministic 2% sample of negative
+  drive-days (md5 of serial+date+seed).
+- Sample weights: negatives ×50 to undo the sampling, then both classes
+  rescaled to equal total weight. This is how the extreme imbalance (0.10%
+  positive drive-days) is handled.
+- `StandardScaler` + `LogisticRegression(C=1)`, seed 0. Deterministic: a
+  re-run gives identical coefficients (tested).
+- The intercept is shifted by log(π/(1−π)), where π is the true positive
+  rate of the training rows. Balanced weights imply a 50/50 prior, and this
+  shift turns the output back into an approximate probability.
+- Comparisons trained on the same rows: the same LR with all features, and
+  a gradient-boosted tree model (`HistGradientBoostingClassifier`, 60 trees
+  of depth 3, 896 nodes).
 
-After removing the window mean: log2 RMS (Q8), log2 peak (Q8), crest factor
-peak/RMS (Q8), zero-crossing rate (Q10), and log2 band amplitude (Q8) in five
-bands (20-60, 60-120, 120-200, 200-300, 300-480 Hz), each the sum of four
-Goertzel bins. Goertzel instead of an FFT because only 20 specific
-frequencies are needed: one multiply-accumulate per sample per bin, two
-words of state per bin, any window length, bins placed exactly on the band
-centres, and no N-point complex buffer or twiddle table.
+## Splits (leakage rules, tested in `tools/smart/tests/`)
 
-## Model selection (rule fixed before the first training run)
+- **Serial split:** 80/20 by drive serial (md5 hash). No drive appears on
+  both sides. Rows from the whole eligible window.
+- **Time split:** train on rows 2026-01-31 .. 03-31, test on 2026-05-01 .. 05-31.
+  The last training label looks 29 days ahead (to 04-29), so no training
+  label sees the test window. This split is closer to real deployment
+  (train on the past, run on the future).
+- **The deployed threshold** is chosen for 1% drive-level false alarms on
+  the last 31 days of the *training* window. It is never tuned on the test
+  set.
 
-Target: validation macro-F1 ≥ 0.85. For each window size, the tree depth
-is the smallest in {3, 4, 5, 6, 8, 10, 12} that meets the target. Then the
-smaller of {tree, MLP} (parameter bytes) that meets it is deployed. The
-firmware default is the smallest window whose deployed model meets it.
+## Metrics (per drive, never accuracy)
 
-| window | tree (depth / nodes / bytes) | tree test macro-F1 | MLP test macro-F1 | deployed |
-|---|---|---|---|---|
-| 64 | 4 / 31 / 372 | 0.876 | **0.952** | MLP (368 B < 372 B) |
-| 128 | 3 / 15 / 180 | 0.917 | 0.966 | tree |
-| 256 | 3 / 15 / 180 | 0.929 | 0.969 | tree |
+Each test drive's score is its highest daily score in the test window. It
+is positive if it failed during the window or within 30 days after it.
+False-alarm rate = healthy drives flagged / healthy drives. Accuracy would
+be 99.8% for "never fails" on the time split, so it is not reported.
 
-Per-class test recall of the deployed N = 64 MLP: quiet 0.984, shock 0.961,
-vibration 0.986, tap 0.990. Benchmark tables with confusion matrices for
-all three window sizes: `results/edgeai/results.md`.
+| Time split (350,500 drives, 843 failed) | PR-AUC | Recall at 1% false alarms |
+|---|---:|---:|
+| Baseline rule, graded (sum of raw 5/187/188/197/198) | 0.033 | 12.2% |
+| **LR, deployable (this model)** | **0.189** (0.164–0.218) | **52.9%** (50–56%) |
+| LR, all features | 0.196 | 52.6% |
+| GBT, all features | 0.208 | 60.1% |
 
-Note: `train.py` first assumed 304 bytes for the MLP; the real
-`sizeof(edgeai_mlp_t)` is 368 (`edgeai_cli cost`). The choice for N = 64
-(368 < 372) is the same either way. The committed `train_report.json`
-still records the 304 from the training run.
+- **Baseline rule "any raw > 0"** (a single operating point): recall 76.5%
+  at **8.5%** false alarms. At that same false-alarm rate this model reaches
+  77.8%, so it **barely beats the rule there**. Its value is at low
+  false-alarm rates.
+- **Deployed threshold on the test window:** recall 53.9% at 1.08% false
+  alarms, precision 10.7%.
+- **Serial split** (71,034 drives, 474 failed): PR-AUC 0.358 vs 0.103 for
+  the graded baseline; recall at 1% false alarms 61.4% vs 11.0%. PR-AUC
+  depends on the positive rate (0.67% here vs 0.24% on the time split), so
+  compare recall at fixed false alarms across splits, not PR-AUC.
 
-## Quantisation
+## Per manufacturer (time split; recall at each group's own 1% false-alarm threshold)
 
-Symmetric int8 with one scale per layer (s_w = max|W|/127); the input
-standardisation and input scale fold into one integer multiplier per
-feature; biases are int32 at the accumulator scale; the hidden layer is
-requantised with a 24-bit fixed-point multiplier; activation scales are the
-99.9th percentile on the training split. Confidence is the softmax of the
-top class, computed with a 17-entry 2^-x table.
+| | Drives | Failed | Graded rule | This model | GBT |
+|---|---:|---:|---:|---:|---:|
+| Seagate | 111,538 | 316 | 19.9% | 64.6% | 65.5% |
+| Toshiba | 124,581 | 253 | 42.3% | 51.8% | 58.1% |
+| WDC | 88,836 | 134 | 50.7% | 54.5% | 52.2% |
+| HGST | 25,545 | 140 | 37.1% | 40.0% | 35.0% |
 
-| window | int8 vs float agreement (test) | float accuracy | int8 accuracy |
-|---|---|---|---|
-| 64 | 99.86% | 98.42% | 98.37% |
-| 128 | 99.92% | 98.29% | 98.28% |
-| 256 | 99.90% | 97.63% | 97.62% |
+The model helps most on Seagate drives, whose 187/188 counters the simple
+rule handles badly (the rule flags 15.3% of healthy Seagates). On HGST and
+WDC it is roughly level with the graded baseline: on the serial split it is
+*below* it (HGST 35.0% vs 39.0%, WDC 56.9% vs 58.5%). Toshiba MG07ACA14TA
+(106 failures) improves from 63.2% to 73.6%. MG10ACA20TE (39 failures) does
+not improve (48.7% vs 51.3%). The full table is in `results/smart/results.md`.
 
-C inference was checked against Python on the whole test split: C int8 equals
-export.py's bit-exact numpy simulation on 100% of windows, and the C
-integer tree equals sklearn's tree on 100% (sklearn's float thresholds lie
-between integer feature values, so `floor()` is exact).
-`tests/test_edgeai.c` re-checks this on 1,000 golden windows per size.
+## Quantization (Python float → firmware integer)
 
-## Known failure modes
+- Scaler folded into the weights. Weights quantised to **int16** with one
+  scale. Integer zero points equal to the training means. Logit in 1/256
+  units via a 64-bit multiply and shift. Probability from a 257-entry
+  sigmoid LUT with linear interpolation. No FPU, no malloc.
+- On all 10,779,155 drive-days of the time-split test window:
+  - the C result equals the Python integer reference in 100% of rows;
+  - the flag agrees with the float scikit-learn model in 100% of rows
+    (0 differ);
+  - max |logit error| 0.0042, max |probability error| 0.0011.
+- **int8 weights were tried first.** They gave up to 0.215 logit and 3.8
+  percentage points of probability error, with 99.996% flag agreement, for
+  failing drives whose large counters sit where the sigmoid is steep. int16
+  costs 17 more bytes.
+- Size: 602 bytes of tables (34 B weights, 34 B zero points, 514 B LUT,
+  20 B constants), plus 1,608 bytes of per-drive state (32-day history
+  ring). Host CPU (x86-64 under WSL2, *not* a drive controller): 10-18 ns
+  per logit, 150-275 ns including feature computation (varies between runs).
 
-- **Too slow for shocks by construction.** A decision every 16 ms over a 64 ms
-  window can only react after a shock has started ringing; the threshold
-  interrupt reacts at the next sample (1 ms). The shock damage happens in the
-  first ~10-30 ms. This is why policy P3 keeps the threshold for the fast path.
-- **Shock "afterglow".** A window keeps containing a shock for up to 64 ms after
-  it ended, so P2 keeps writes inhibited after the danger has passed (counted
-  as needless stall in the benchmark).
-- **Strong vibration called "shock".** On the vibration-heavy benchmark mix,
-  shock precision is 0.37: 643 vibration windows were called shock (out of
-  1,067 shock calls), so P2 inhibits writes during strong vibration.
-- **Measured in the system benchmark** (`results/edgeai/results.md`): with the
-  classifier alone (P2), shock-heavy environments get 29 corrupted sectors
-  per 1,000 writes vs 1.3 for a 250 mg threshold (reaction time); under
-  vibration, P2 beats that threshold (3.3 vs 11.5) but not a 150 mg one, and
-  its verify-after-write costs ~40% of write IOPS there (93 vs 154 for
-  the 250 mg threshold).
-- **Tap vs small shock.** Classes overlap at 280-320 Hz, 400-1500 mg; a hard tap
-  can be called a shock (needless inhibit) and a soft high-frequency shock a
-  tap (no protection; in this physics, such shocks mostly do little harm).
-- **Vibration is a situation, not a harm level.** Low-frequency (< 60 Hz) or weak
-  vibration is classified as vibration although the servo rejects it; the
-  policy then pays for verify-after-write it did not need.
-- **Distribution.** Trained on one synthetic mix; the benchmark mixes only
-  re-weight the same generators. Real chassis vibration (multi-axis, drive
-  resonances, non-stationary fans) would need new data.
+## Known failure modes and caveats
+
+- **Silent failures.** On the time split, 23.5% of the drives that failed
+  never showed a non-zero 5/187/188/197/198 in the window. No counter-based
+  model can catch those (only temperature and age remain), which caps recall.
+- **One fleet, one half-year.** Backblaze's workload, enclosures, cooling and
+  replacement policy are baked in. The time split already shows drift:
+  recall at 1% false alarms falls from 61% (serial split) to 53% (time
+  split, two months later).
+- **Coefficients are not explanations.** The counter features are strongly
+  correlated (raw vs 7-day vs 30-day growth), so some weights come out
+  negative (e.g. `lg_raw_187`, `lg_d7_5`). Temperature and power-on hours
+  also get negative weights, probably because of fleet composition (which
+  models sit where, survivor effects). Read the model as a whole, not
+  weight by weight.
+- **Calibration is approximate.** The prior shift is a global correction;
+  per-manufacturer base rates differ. Use the risk score for ranking and
+  thresholding, and the probability only as a rough guide.
+- **Snapshot gaps.** Backblaze occasionally misses a day for a drive. The
+  SQL deltas then use the earliest snapshot inside the window, while the
+  firmware fills idle days with the previous values. Both agree whenever
+  there is a snapshot every day.
+- **In fwsim:**
+  - 188 (command timeouts) and 198 (offline uncorrectable) are always 0,
+    because the simulator has no timeouts and no offline scan;
+  - temperature is an input, not a thermal model;
+  - the counters in the deployment demo are scripted.
+  The demo shows the plumbing, not accuracy.

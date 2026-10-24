@@ -13,6 +13,7 @@
 #include "squeue.h"
 
 #define SK_NO_SENSE        0x0
+#define SK_RECOVERED_ERROR 0x1
 #define SK_MEDIUM_ERROR    0x3
 #define SK_HARDWARE_ERROR  0x4
 #define SK_ILLEGAL_REQUEST 0x5
@@ -31,6 +32,11 @@ static const struct {
     [FW_ERR_TAG_IN_USE]     = { "TAG_IN_USE",     { SK_ABORTED_COMMAND, 0x4E, 0x00 } },
     [FW_ERR_ABORTED]        = { "ABORTED",        { SK_ABORTED_COMMAND, 0x00, 0x00 } },
     [FW_ERR_HARDWARE]       = { "HARDWARE_ERROR", { SK_HARDWARE_ERROR,  0x44, 0x00 } },
+    [FW_ERR_SMART_DISABLED] = { "SMART_DISABLED", { SK_ILLEGAL_REQUEST, 0x2C, 0x00 } },
+    /* SPC "informational exception": the drive predicts its own failure.
+     * RECOVERED ERROR = the command itself worked; 5D/00 = FAILURE
+     * PREDICTION THRESHOLD EXCEEDED, the code SMART trips are reported with. */
+    [FW_INFO_FAILURE_PREDICTED] = { "FAILURE_PREDICTED", { SK_RECOVERED_ERROR, 0x5D, 0x00 } },
 };
 
 const char *fw_status_str(fw_status_t st)
@@ -52,7 +58,7 @@ const char *fw_opcode_str(uint8_t op)
     static const char *names[FW_OP_COUNT] = {
         [FW_OP_IDENTIFY] = "IDENTIFY", [FW_OP_READ] = "READ",
         [FW_OP_WRITE] = "WRITE",       [FW_OP_FLUSH] = "FLUSH",
-        [FW_OP_SET_FEATURES] = "SET_FEATURES",
+        [FW_OP_SET_FEATURES] = "SET_FEATURES", [FW_OP_SMART_READ] = "SMART_READ",
     };
     return op < FW_OP_COUNT ? names[op] : "INVALID";
 }

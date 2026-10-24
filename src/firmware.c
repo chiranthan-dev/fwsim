@@ -10,7 +10,8 @@
  *   - the two queues (their own synchronisation, see ring_*.h),
  *   - power_on / stop_req flags (atomics),
  *   - the tag-busy bitmap (atomic fetch_or / fetch_and),
- *   - the statistics counters (single-writer atomics, see util.h).
+ *   - the statistics counters (single-writer atomics, see util.h),
+ *   - the SMART simulation inputs (idle-time offset, temperature: atomics).
  */
 #include "fwsim.h"
 
@@ -25,6 +26,7 @@
 #include "clock.h"
 #include "env_monitor.h"
 #include "media.h"
+#include "smart.h"
 #include "squeue.h"
 
 /* Largest transfer a command may request (like MDTS / max sectors per
@@ -66,8 +68,14 @@ struct fw {
     uint32_t        ss;             /* sector size                           */
     size_t          high_wm, low_wm;
     env_monitor_t  *vib;            /* shock/vibration monitor; NULL = off   */
+    int             smart_on;       /* SMART enabled (off by default)        */
+    smart_t         smart;          /* attributes + daily history            */
 
     fw_counters_t   ctr;
+
+    /* --- written by the host (fw_sim_*), read by the firmware --- */
+    _Atomic uint64_t sim_idle_ms;   /* simulated idle time added to the clock */
+    atomic_uint      temp_c;
 };
 
 typedef fw_status_t (*fw_handler_t)(fw_t *fw, fw_cmd_t *cmd);
@@ -94,6 +102,8 @@ void fw_config_default(fw_config_t *cfg)
     cfg->read_retries = 3;
     cfg->fault_read_flip_prob = 0.0;
     cfg->seed = 1;
+    cfg->smart_enable = 0;
+    cfg->smart_temp_c = 35;
 }
 
 /* ---- helpers --------------------------------------------------------------- */
@@ -274,6 +284,9 @@ static fw_status_t h_identify(fw_t *fw, fw_cmd_t *cmd)
     id.read_ahead_enabled = (uint8_t)fw->ra_enabled;
     id.fua_supported = 1;
     snprintf(id.queue_impl, sizeof(id.queue_impl), "%s", SQUEUE_IMPL);
+    id.smart_supported = 1;
+    id.smart_enabled = (uint8_t)fw->smart_on;
+    id.smart_model_id = SMART_MODEL_ID;
     /* IDENTIFY always transfers exactly one sector, zero-padded. */
     memset(cmd->buf, 0, fw->ss);
     memcpy(cmd->buf, &id, sizeof(id));
@@ -393,9 +406,54 @@ static fw_status_t h_set_features(fw_t *fw, fw_cmd_t *cmd)
     case FW_FEAT_READ_AHEAD:
         fw->ra_enabled = (int)cmd->feature_value;
         return FW_OK;
+    case FW_FEAT_SMART:
+        fw->smart_on = (int)cmd->feature_value;
+        return FW_OK;
     default:
         return FW_ERR_INVALID_FIELD;
     }
+}
+
+/* ---- SMART ------------------------------------------------------------------ */
+
+/* The drive's power-on clock: media time plus idle time the host told us
+ * passed (fw_sim_advance_hours). Integer milliseconds from here on. */
+static uint64_t smart_now_ms(fw_t *fw)
+{
+    return (uint64_t)fw->media.sim_ms +
+           atomic_load_explicit(&fw->sim_idle_ms, memory_order_relaxed);
+}
+
+/* Fold the current counters into the SMART attributes/history. Cheap
+ * (a few stores) unless a day boundary was crossed. */
+static void smart_tick(fw_t *fw)
+{
+    uint64_t c[SMART_NCOUNTERS] = { 0 };
+    c[SMART_C_5] = ctr_get(&fw->ctr.reallocations);
+    c[SMART_C_187] = ctr_get(&fw->ctr.crc_unrecovered);
+    c[SMART_C_197] = fw->media.npending;
+    /* 188 (command timeout) and 198 (offline uncorrectable) stay 0: fwsim
+     * has no command timeouts and no offline surface scan. */
+    smart_update(&fw->smart, smart_now_ms(fw), c,
+                 atomic_load_explicit(&fw->temp_c, memory_order_relaxed));
+}
+
+_Static_assert(sizeof(fw_smart_data_t) <= 512, "SMART data must fit one sector");
+
+static fw_status_t h_smart_read(fw_t *fw, fw_cmd_t *cmd)
+{
+    /* Like ATA SMART READ DATA: one sector, page D0h, no LBA. */
+    if (cmd->buf == NULL || cmd->count != 1 || cmd->lba != 0 ||
+        cmd->feature != FW_SMART_PAGE_DATA)
+        return FW_ERR_INVALID_FIELD;
+    if (!fw->smart_on)
+        return FW_ERR_SMART_DISABLED;
+    smart_tick(fw);
+    fw_smart_data_t d;
+    smart_report(&fw->smart, &d);
+    memset(cmd->buf, 0, fw->ss);
+    memcpy(cmd->buf, &d, sizeof(d));
+    return d.predicted_failure ? FW_INFO_FAILURE_PREDICTED : FW_OK;
 }
 
 /*
@@ -411,6 +469,7 @@ static const fw_handler_t dispatch[FW_OP_COUNT] = {
     [FW_OP_WRITE]        = h_write,
     [FW_OP_FLUSH]        = h_flush,
     [FW_OP_SET_FEATURES] = h_set_features,
+    [FW_OP_SMART_READ]   = h_smart_read,
 };
 
 /* ---- background work after a command ---------------------------------------- */
@@ -499,7 +558,7 @@ static void complete(fw_t *fw, fw_cmd_t *cmd, fw_status_t st)
         trace_cmd(fw, FW_TRACE_CMD_DONE, cmd, st);
     if (cmd->opcode < FW_OP_COUNT)
         ctr_add(&fw->ctr.cmds[cmd->opcode], 1);
-    if (st != FW_OK)
+    if (st != FW_OK && st != FW_INFO_FAILURE_PREDICTED)   /* a warning, not a failure */
         ctr_add(&fw->ctr.cmd_errors, 1);
 
     /* Free the tag BEFORE posting: once the host sees the completion it
@@ -541,6 +600,8 @@ static void process(fw_t *fw, fw_cmd_t *cmd)
         read_ahead(fw, st, lba, count);
     else if (op == FW_OP_WRITE)
         threshold_destage(fw);
+    if (fw->smart_on)
+        smart_tick(fw);
     /* Background destaging gets a bounded slice after every command. */
     if (plan_active(fw))
         plan_step(fw, fw->cfg.destage_runs_per_cmd ? fw->cfg.destage_runs_per_cmd : 1);
@@ -636,6 +697,10 @@ fw_t *fw_create(const fw_config_t *cfg, int *err)
     atomic_init(&fw->power_on, 1);
     atomic_init(&fw->stop_req, 0);
     atomic_init(&fw->tags_busy, 0);
+    atomic_init(&fw->sim_idle_ms, 0);
+    atomic_init(&fw->temp_c, cfg->smart_temp_c);
+    smart_init(&fw->smart);
+    fw->smart_on = cfg->smart_enable != 0;
 
     rc = media_open(&fw->media, &fw->cfg, &fw->power_on, &fw->ctr);
     if (rc != 0)
@@ -877,4 +942,14 @@ double fw_sim_now_ms(const fw_t *fw)
 int fw_inject_media_bitflip(fw_t *fw, uint64_t lba, int bit)
 {
     return media_inject_bitflip(&fw->media, lba, bit);
+}
+
+void fw_sim_advance_hours(fw_t *fw, uint64_t hours)
+{
+    atomic_fetch_add_explicit(&fw->sim_idle_ms, hours * SMART_MS_PER_HOUR, memory_order_relaxed);
+}
+
+void fw_sim_set_temperature(fw_t *fw, uint32_t celsius)
+{
+    atomic_store_explicit(&fw->temp_c, celsius, memory_order_relaxed);
 }

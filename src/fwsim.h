@@ -44,6 +44,8 @@ typedef enum {
     FW_OP_WRITE,            /* honours FW_CMD_FUA                        */
     FW_OP_FLUSH,            /* destage all dirty data to media           */
     FW_OP_SET_FEATURES,     /* e.g. enable/disable the write cache       */
+    FW_OP_SMART_READ,       /* SMART attributes + failure prediction, see
+                               fw_smart_data_t (needs SMART enabled)     */
     FW_OP_COUNT
 } fw_opcode_t;
 
@@ -55,6 +57,11 @@ typedef enum {
 /* SET_FEATURES feature codes (modelled on ATA SET FEATURES 02h/82h). */
 #define FW_FEAT_WRITE_CACHE 0x02   /* value: 1 = write-back, 0 = write-through */
 #define FW_FEAT_READ_AHEAD  0xAA   /* value: 1 = on, 0 = off                   */
+#define FW_FEAT_SMART       0xD8   /* value: 1 = enable SMART, 0 = disable
+                                      (ATA SMART ENABLE/DISABLE OPERATIONS) */
+
+/* SMART_READ "page" (cmd->feature), like ATA SMART READ DATA (D0h). */
+#define FW_SMART_PAGE_DATA  0xD0
 
 /*
  * Status codes, modelled loosely on SCSI sense data. Each maps to a sense
@@ -70,6 +77,12 @@ typedef enum {
     FW_ERR_TAG_IN_USE,      /* ABORTED COMMAND   4E/00 overlapped commands     */
     FW_ERR_ABORTED,         /* ABORTED COMMAND   00/00 (power loss, shutdown)  */
     FW_ERR_HARDWARE,        /* HARDWARE ERROR    44/00 internal target failure */
+    FW_ERR_SMART_DISABLED,  /* ILLEGAL REQUEST   2C/00 command sequence error:
+                               SMART_READ while SMART is disabled           */
+    /* Not an error: the command succeeded and its data is valid, but the
+     * drive predicts its own failure (SCSI informational exception). */
+    FW_INFO_FAILURE_PREDICTED, /* RECOVERED ERROR 5D/00 failure prediction
+                               threshold exceeded                          */
     FW_STATUS_COUNT
 } fw_status_t;
 
@@ -121,7 +134,46 @@ typedef struct {
     uint8_t  read_ahead_enabled;
     uint8_t  fua_supported;
     char     queue_impl[12];      /* "lockfree" or "mutex" */
+    uint8_t  smart_supported;     /* FW_OP_SMART_READ implemented          */
+    uint8_t  smart_enabled;       /* ... and currently enabled             */
+    uint8_t  reserved[2];
+    uint32_t smart_model_id;      /* identifies the exported model         */
 } fw_identify_t;
+
+/* ---- SMART ------------------------------------------------------------------
+ *
+ * SMART_READ (cmd->feature = FW_SMART_PAGE_DATA, lba = 0, count = 1, buf =
+ * one sector) returns this, zero-padded to a sector. The attribute table
+ * mirrors ATA SMART; the prediction comes from a logistic regression
+ * trained offline on Backblaze data (tools/smart/) and exported to integer
+ * tables (src/smart_model.h). See README "SMART failure prediction".
+ * When the prediction trips, the command completes with status
+ * FW_INFO_FAILURE_PREDICTED (data still valid) instead of FW_OK.
+ */
+#define FW_SMART_VERSION 1
+#define FW_SMART_NATTR   7
+
+typedef struct {
+    uint8_t  id;            /* SMART attribute number (5, 9, 187, ...)   */
+    uint8_t  normalized;    /* 100 = new, lower = worse                   */
+    uint8_t  worst;         /* lowest normalised value ever reported      */
+    uint8_t  threshold;     /* normalised <= threshold: attribute failing */
+    uint32_t reserved;
+    uint64_t raw;
+} fw_smart_attr_t;
+
+typedef struct {
+    uint16_t version;            /* FW_SMART_VERSION                       */
+    uint8_t  num_attrs;          /* FW_SMART_NATTR                          */
+    uint8_t  predicted_failure;  /* 1: the model's flag has tripped         */
+    uint16_t risk_bp;            /* P(fail within 30 days), basis points    */
+    uint16_t history_days;       /* daily samples in the history ring       */
+    int32_t  logit_q8;           /* model log-odds x 256                    */
+    int32_t  threshold_q8;       /* flag when logit_q8 >= this              */
+    uint32_t model_id;
+    uint32_t power_on_hours;
+    fw_smart_attr_t attr[FW_SMART_NATTR];
+} fw_smart_data_t;
 
 /* ---- tracing ----------------------------------------------------------------
  *
@@ -204,6 +256,9 @@ typedef struct {
     uint64_t      seed;
     fw_trace_fn   trace;              /* optional observer, see above      */
     void         *trace_ctx;
+    int           smart_enable;       /* 1 = SMART on at power-up (default 0;
+                                         SET_FEATURES FW_FEAT_SMART toggles) */
+    uint32_t      smart_temp_c;       /* temperature input (no thermal model) */
 
     /* ---- mechanical environment (README "Edge AI vibration classifier").
      * Everything is OFF by default: with vib_env == 0 there is no
@@ -325,6 +380,13 @@ double   fw_sim_now_ms(const fw_t *fw);
  * but the effect on an in-flight read of the same sector is undefined -
  * just as with a real media defect. Returns 0 or -1. */
 int fw_inject_media_bitflip(fw_t *fw, uint64_t lba, int bit);
+
+/* Simulation hooks for SMART (safe from the host thread at any time):
+ * let `hours` of simulated power-on time pass without media activity
+ * (the drive sat idle), and set the temperature sensor input. They change
+ * nothing unless SMART is enabled. */
+void fw_sim_advance_hours(fw_t *fw, uint64_t hours);
+void fw_sim_set_temperature(fw_t *fw, uint32_t celsius);
 
 #ifdef __cplusplus
 }
