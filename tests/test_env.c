@@ -150,7 +150,7 @@ typedef struct {
     double value;
 } gate_t;
 
-enum { G_INHIBIT_UNTIL, G_ABORT_ONCE, G_SETTLE, G_VERIFY, G_FOREVER };
+enum { G_INHIBIT_UNTIL, G_ABORT_ONCE, G_SETTLE, G_VERIFY, G_FOREVER, G_CREEP };
 
 static void fake_gate(void *ctx, double t_ms, media_wpolicy_t *pol)
 {
@@ -162,6 +162,7 @@ static void fake_gate(void *ctx, double t_ms, media_wpolicy_t *pol)
     case G_SETTLE:        pol->settle_ms = g->value; break;
     case G_VERIFY:        pol->verify = (uint32_t)g->value; break;
     case G_FOREVER:       pol->inhibit_until_ms = t_ms + 1000.0; break;
+    case G_CREEP:         pol->inhibit_until_ms = t_ms + 0.3; break;   /* never quite ends */
     }
 }
 
@@ -209,6 +210,18 @@ static void test_gate_stall_is_bounded(void)
     CHECK_EQ(media_write(&r.m, 7, 1, buf), FW_OK);
     CHECK_EQ(ctr_get(&r.ctr.vib_stall_timeouts), 1);
     CHECK_EQ(ctr_get(&r.ctr.vib_stall_us), (uint64_t)(MEDIA_MAX_STALL_MS * 1000));
+
+    /* Regression: thousands of short stalls (an inhibit re-extended by
+     * every sample, as a low threshold in strong vibration does) late in a
+     * long run. The limit was once a floating-point running sum that could
+     * stop just short of 500 ms by less than the clock's resolution, and
+     * the write then stalled for zero time forever. */
+    gate_t creep = { G_CREEP, 0, 0 };
+    r.m.wgate_ctx = &creep;
+    r.m.sim_ms = 123456.789;
+    CHECK_EQ(media_write(&r.m, 9, 1, buf), FW_OK);
+    CHECK_EQ(ctr_get(&r.ctr.vib_stall_timeouts), 2);
+    CHECK(creep.calls > 1000);
     media_close(&r.m);
 }
 

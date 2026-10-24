@@ -7,6 +7,8 @@
  *         [--write-through] [--fua] [--no-readahead] [--unsorted-destage]
  *         [--cache ENTRIES] [--time-scale X] [--flip-prob P]
  *         [--media PATH] [--seed N] [--quiet]
+ *         [--vib-env quiet|shock|vibration|mixed] [--vib-policy none|threshold|ai|hybrid]
+ *         [--vib-threshold MG] [--vib-window N] [--vib-irq-threaded]
  */
 #include <inttypes.h>
 #include <stdio.h>
@@ -14,7 +16,9 @@
 #include <string.h>
 #include <unistd.h>
 
+#include "env_monitor.h"
 #include "fwsim.h"
+#include "periph/env_sim.h"
 #include "workload.h"
 
 static void usage(void)
@@ -24,7 +28,10 @@ static void usage(void)
             "             [--ops N] [--qd N] [--xfer SECTORS] [--region LBAS]\n"
             "             [--write-through] [--fua] [--no-readahead] [--unsorted-destage]\n"
             "             [--cache ENTRIES] [--time-scale X] [--flip-prob P]\n"
-            "             [--media PATH] [--seed N] [--quiet]\n");
+            "             [--media PATH] [--seed N] [--quiet]\n"
+            "             [--vib-env quiet|shock|vibration|mixed]\n"
+            "             [--vib-policy none|threshold|ai|hybrid] [--vib-threshold MG]\n"
+            "             [--vib-window N] [--vib-irq-threaded]\n");
 }
 
 static int parse_kind(const char *s, wl_kind_t *k)
@@ -88,6 +95,24 @@ int main(int argc, char **argv)
             cfg.read_ahead_sectors = 0;
         } else if (!strcmp(a, "--unsorted-destage")) {
             cfg.destage_sorted = 0;
+        } else if (!strcmp(a, "--vib-env")) {
+            NEEDV();
+            if ((cfg.vib_env = env_mix_parse(v)) < 0) {
+                usage();
+                return 2;
+            }
+        } else if (!strcmp(a, "--vib-policy")) {
+            NEEDV();
+            if ((cfg.vib_policy = vib_policy_parse(v)) < 0) {
+                usage();
+                return 2;
+            }
+        } else if (!strcmp(a, "--vib-threshold")) {
+            NEEDV(); cfg.vib_threshold_mg = (uint32_t)strtoul(v, NULL, 0);
+        } else if (!strcmp(a, "--vib-window")) {
+            NEEDV(); cfg.vib_window = (uint32_t)strtoul(v, NULL, 0);
+        } else if (!strcmp(a, "--vib-irq-threaded")) {
+            cfg.vib_irq_threaded = 1;
         } else if (!strcmp(a, "--quiet")) {
             quiet = 1;
         } else {
@@ -158,6 +183,20 @@ int main(int argc, char **argv)
                " unrecovered, %" PRIu64 " injected flips\n",
                st.crc_errors, st.crc_recovered, st.crc_unrecovered, st.transient_flips);
         printf("errors    : %" PRIu64 " commands failed\n", res.errors);
+        if (cfg.vib_env) {
+            printf("vibration : env %s, policy %s: %" PRIu64 " off-track sectors, %" PRIu64
+                   " classifier windows (q/s/v/t %" PRIu64 "/%" PRIu64 "/%" PRIu64 "/%" PRIu64
+                   "), %" PRIu64 " threshold IRQs\n",
+                   env_mix_str(cfg.vib_env), vib_policy_str(cfg.vib_policy),
+                   st.vib_offtrack_sectors, st.vib_windows, st.vib_class_windows[0],
+                   st.vib_class_windows[1], st.vib_class_windows[2], st.vib_class_windows[3],
+                   st.vib_shock_irqs);
+            printf("protection: %" PRIu64 " inhibits, %.1f ms stalled (%.1f ms needlessly), %"
+                   PRIu64 " gate aborts, %" PRIu64 " verified writes, %" PRIu64
+                   " sectors rewritten, %" PRIu64 " early releases\n",
+                   st.vib_inhibits, st.vib_stall_ms, st.vib_false_stall_ms, st.vib_write_aborts,
+                   st.vib_verified_writes, st.vib_verify_rewrites, st.vib_early_releases);
+        }
     }
     wl_result_free(&res);
     fw_destroy(fw);

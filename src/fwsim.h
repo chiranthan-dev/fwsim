@@ -136,7 +136,9 @@ typedef enum {
     FW_TRACE_MEDIA = 0,     /* a media access is starting (timing known)   */
     FW_TRACE_CMD_START,     /* firmware dequeued a command (ACTIVE)        */
     FW_TRACE_CMD_DONE,      /* completion about to be posted (COMPLETED)   */
-    FW_TRACE_CRC            /* a CRC mismatch was resolved (or not)        */
+    FW_TRACE_CRC,           /* a CRC mismatch was resolved (or not)        */
+    FW_TRACE_VIBRATION      /* vibration monitor: a classifier window, or a
+                               threshold interrupt (vib_class = 255)       */
 } fw_trace_kind_t;
 
 typedef enum {
@@ -161,6 +163,13 @@ typedef struct {
     uint32_t    count;
     uint32_t    cyl, head, sector, spt;  /* where `lba` physically lives   */
     double      seek_ms, rot_ms, xfer_ms; /* MEDIA: disk-sim's breakdown   */
+    /* VIBRATION */
+    uint8_t     vib_class;  /* 0 quiet 1 shock 2 vibration 3 tap; 255 = threshold IRQ */
+    uint8_t     vib_conf;   /* classifier confidence, percent              */
+    uint8_t     vib_inhibit;  /* writes are inhibited after this event      */
+    uint8_t     vib_protect;  /* vibration mode: extra settle + verify      */
+    uint32_t    vib_rms_mg, vib_peak_mg;  /* of the classified window       */
+    double      vib_inhibit_until_ms;
 } fw_trace_t;
 
 typedef void (*fw_trace_fn)(void *ctx, const fw_trace_t *ev);
@@ -202,7 +211,22 @@ typedef struct {
      * exactly the one without this feature. */
     int           vib_env;            /* env_mix_t (periph/env_sim.h); 0 = off */
     uint64_t      vib_seed;           /* environment seed; 0 = use `seed`      */
+    /* Write protection (env_monitor.h); needs vib_env. 0 = default for
+     * every numeric field below. */
+    int           vib_policy;         /* FW_VIB_*; 0 = none (P0)               */
+    uint32_t      vib_threshold_mg;   /* P1/P3 shock threshold (250)           */
+    double        vib_settle_ms;      /* inhibit after a shock (20)            */
+    uint32_t      vib_window;         /* classifier window, samples (exported default) */
+    double        vib_extra_settle_ms;/* vibration: min post-seek settle (1.5) */
+    uint32_t      vib_verify_passes;  /* vibration: verify-after-write (2)     */
+    int           vib_irq_threaded;   /* 1: ISRs on an interrupt thread (TSan) */
 } fw_config_t;
+
+/* Write-protection policies (fw_config_t.vib_policy). */
+#define FW_VIB_NONE      0   /* P0 */
+#define FW_VIB_THRESHOLD 1   /* P1: threshold interrupt, no AI */
+#define FW_VIB_AI        2   /* P2: classifier */
+#define FW_VIB_HYBRID    3   /* P3: threshold for speed + classifier */
 
 /* ---- statistics (a snapshot; safe to call at any time) ------------------- */
 
@@ -237,6 +261,12 @@ typedef struct {
     uint64_t vib_extra_settles;          /* extra settle cost a revolution     */
     uint64_t vib_verified_writes;        /* writes read back after writing     */
     uint64_t vib_verify_rewrites;        /* sectors rewritten after a verify   */
+    uint64_t vib_windows;                /* classifier windows run             */
+    uint64_t vib_class_windows[4];       /* ... by class (quiet shock vib tap)  */
+    uint64_t vib_shock_irqs;             /* threshold interrupts handled       */
+    uint64_t vib_inhibits;               /* write-inhibit episodes             */
+    uint64_t vib_early_releases;         /* hybrid: inhibits ended by the model */
+    uint64_t vib_isr_runs;               /* accelerometer ISR invocations      */
 } fw_stats_t;
 
 typedef struct fw fw_t;

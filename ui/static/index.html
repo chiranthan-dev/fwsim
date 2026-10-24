@@ -67,6 +67,23 @@
       <option value="40">1/40 speed (180 rpm)</option>
     </select>
   </label>
+  <label>Vibration (synthetic)
+    <select id="c-env">
+      <option value="0" selected>Off</option>
+      <option value="1">Quiet room</option>
+      <option value="2">Shock-heavy</option>
+      <option value="3">Vibration-heavy (busy chassis)</option>
+      <option value="4">Mixed</option>
+    </select>
+  </label>
+  <label>Write protection
+    <select id="c-policy">
+      <option value="0">P0 none</option>
+      <option value="1">P1 threshold interrupt</option>
+      <option value="2" selected>P2 Edge AI classifier</option>
+      <option value="3">P3 hybrid</option>
+    </select>
+  </label>
   <p class="hint" id="hint">Settings apply when you press Run.</p>
 </section>
 
@@ -112,6 +129,13 @@
     <div class="card chart-card">
       <div class="row-between"><span class="label-strong">Latency per command</span><span class="muted small">recent commands · ms, log scale</span></div>
       <canvas id="lat" role="img" aria-label="Latency of recent commands on a log scale"></canvas>
+    </div>
+
+    <div class="card vib-card" aria-label="Vibration monitor">
+      <div class="row-between"><span class="label-strong">Vibration monitor</span><span id="v-class" class="vpill">off</span></div>
+      <canvas id="vib" role="img" aria-label="Accelerometer RMS per classifier window, coloured by the predicted class"></canvas>
+      <div class="row-between small muted"><span class="vlegend"><i style="background:#5b6475"></i>quiet <i style="background:#ef4444"></i>shock <i style="background:#f59e0b"></i>vibration <i style="background:#60a5fa"></i>tap <i style="background:#e5e7eb;width:2px"></i>threshold IRQ</span><span id="v-state">–</span></div>
+      <div class="counts mono small" id="v-counts">windows 0 · off-track sectors 0</div>
     </div>
 
     <div class="card verify-card" id="verify" aria-live="polite">

@@ -52,6 +52,8 @@ typedef struct {
     /* mechanical environment (media_write's environment path) */
     counter_t vib_offtrack_sectors, vib_stall_us, vib_false_stall_us, vib_stall_timeouts;
     counter_t vib_write_aborts, vib_extra_settles, vib_verified_writes, vib_verify_rewrites;
+    /* vibration monitor (env_monitor.c) */
+    counter_t vib_windows, vib_class_windows[4], vib_shock_irqs, vib_inhibits, vib_early_releases;
 } fw_counters_t;
 
 /*
@@ -82,9 +84,9 @@ typedef struct {
 
 typedef void (*media_wgate_fn)(void *ctx, double t_ms, media_wpolicy_t *pol);
 
-/* A write never waits longer than this for an inhibit to end (per command):
- * firmware cannot stall a host command forever, so after this it writes
- * anyway and counts a stall timeout. */
+/* A write is held by inhibits for at most this long after its first stall
+ * (per media write): firmware cannot stall a host command forever, so after
+ * this it writes anyway and counts a stall timeout. */
 #define MEDIA_MAX_STALL_MS   500.0
 /* ... and is aborted at the write gate at most this many times. */
 #define MEDIA_MAX_GATE_ABORTS 8u
@@ -160,6 +162,10 @@ fw_status_t media_read_ahead(media_t *m, uint64_t lba, uint32_t n, void *buf,
 fw_status_t media_write(media_t *m, uint64_t lba, uint32_t n, const void *buf);
 
 int media_inject_bitflip(media_t *m, uint64_t lba, int bit);
+
+/* The simulated clock now (ms), as the next access would see it.
+ * Firmware thread only. */
+double media_now_ms(media_t *m);
 
 /* Fill ev->cyl/head/sector/spt for `lba` (sets has_chs). Firmware thread. */
 void media_locate(const media_t *m, uint64_t lba, fw_trace_t *ev);

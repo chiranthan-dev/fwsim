@@ -78,17 +78,18 @@ FW_SRCS = src/clock.c src/crc32.c src/status.c src/ring_mutex.c src/ring_spsc.c 
           src/periph/spi_ctrl.c src/periph/gpio_ctrl.c src/periph/accel_model.c \
           src/periph/board.c src/periph/env_sim.c \
           src/drivers/spi.c src/drivers/gpio.c src/drivers/accel.c \
-          src/edgeai/features.c src/edgeai/infer.c
+          src/edgeai/features.c src/edgeai/infer.c src/env_monitor.c
 FW_OBJS = $(FW_SRCS:%.c=$(BUILD)/%.o)
 FW_LIB  = $(BUILD)/libfwsim.a
 
 TESTS     = test_crc test_ring test_cache test_dispatch test_integrity test_powerloss \
-            test_drivers test_env test_edgeai
+            test_drivers test_env test_edgeai test_policy
 TEST_BINS = $(TESTS:%=$(BUILD)/tests/%)
 CLI       = $(BUILD)/fwsim
 BENCH     = $(BUILD)/fwbench
 UI        = $(BUILD)/fwsim-ui
 EDGEAI    = $(BUILD)/edgeai_cli
+BENCH_AI  = $(BUILD)/fwbench_edgeai
 UI_PORT  ?= 8080
 
 # Sanitizer runtime options: fail loudly on the first report.
@@ -105,11 +106,11 @@ else
   RUN =
 endif
 
-.PHONY: all lib test asan tsan bench run-tests clean ui run-ui nofloat edgeai-train
+.PHONY: all lib test asan tsan bench run-tests clean ui run-ui nofloat edgeai-train bench-edgeai
 # Keep object files that make would otherwise treat as intermediates.
 .SECONDARY:
 
-all: $(CLI) $(BENCH) $(UI) $(EDGEAI)
+all: $(CLI) $(BENCH) $(UI) $(EDGEAI) $(BENCH_AI)
 
 ui: $(UI)
 
@@ -148,6 +149,34 @@ $(BUILD)/tests/%: $(BUILD)/tests/%.o $(FW_LIB) $(DS_LIB)
 $(EDGEAI): $(BUILD)/tools/edgeai/edgeai_cli.o $(FW_LIB) $(DS_LIB)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
 
+$(BENCH_AI): $(BUILD)/bench/bench_edgeai.o $(FW_LIB) $(DS_LIB)
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+# The Edge AI benchmark (results from real runs only; ~10 min on 4 cores):
+#   classifier: confusion matrix / F1 / recall on the held-out test seeds per
+#               window size, the deployed model per environment mix, shock
+#               detection latency vs a threshold, cost per window (host CPU);
+#   system:     P0 / P1 (threshold sweep) / P2 / P3 on four mixes x
+#               EDGEAI_SEEDS seeds; report.py adds means and 95% CIs.
+EDGEAI_SEEDS ?= 30
+bench-edgeai:
+	$(MAKE) --no-print-directory QUEUE=lockfree SAN= build/lockfree/fwbench_edgeai build/lockfree/edgeai_cli
+	@mkdir -p results/edgeai
+	for n in 64 128 256; do \
+	    ./build/lockfree/edgeai_cli eval --window $$n --seeds 161-200 --secs 30 --mix train \
+	        --threshold 250 > results/edgeai/classifier_$$n.json || exit 1; \
+	    ./build/lockfree/edgeai_cli cost --window $$n > results/edgeai/cost_$$n.json || exit 1; \
+	done
+	for m in shock vibration mixed quiet; do \
+	    ./build/lockfree/edgeai_cli eval --window 64 --seeds 5001-5030 --secs 30 --mix $$m \
+	        --threshold 250 > results/edgeai/classifier_mix_$$m.json || exit 1; \
+	done
+	for m in shock vibration mixed quiet; do \
+	    ./build/lockfree/fwbench_edgeai --out results/edgeai/system_$$m.csv --mix $$m \
+	        --seeds $(EDGEAI_SEEDS) & \
+	done; wait
+	$(PYTHON) tools/edgeai/report.py --seeds $(EDGEAI_SEEDS)
+
 # The classifier's inference path must not use floating point (an MCU
 # without an FPU, and no FPU state to save in the bottom half). The x86
 # -mgeneral-regs-only flag turns any float/double code into a compile error.
@@ -181,6 +210,9 @@ run-tests: $(TEST_BINS) $(CLI)
 	$(RUN) ./$(CLI) --quiet --workload seqread --ops 200 --xfer 64 --time-scale 0.002
 	$(RUN) ./$(CLI) --quiet --workload randwrite --ops 200 --write-through --time-scale 0.002
 	$(RUN) ./$(CLI) --quiet --workload randwrite --ops 200 --fua --unsorted-destage --time-scale 0.002
+	$(RUN) ./$(CLI) --quiet --workload mixed --ops 300 --vib-env mixed --vib-policy ai --time-scale 0
+	$(RUN) ./$(CLI) --quiet --workload randwrite --ops 300 --qd 4 --write-through --vib-env shock \
+	    --vib-policy hybrid --vib-irq-threaded --time-scale 0
 	@echo "run-tests: QUEUE=$(QUEUE) SAN=$(if $(SAN),$(SAN),none): all passed"
 
 test:
@@ -207,4 +239,4 @@ clean:
 	rm -rf build
 
 -include $(FW_OBJS:.o=.d) $(DS_OBJS:.o=.d) $(BUILD)/src/main.d $(BUILD)/bench/bench.d $(BUILD)/ui/server.d \
-         $(TEST_BINS:=.d) $(BUILD)/tools/edgeai/edgeai_cli.d
+         $(TEST_BINS:=.d) $(BUILD)/tools/edgeai/edgeai_cli.d $(BUILD)/bench/bench_edgeai.d

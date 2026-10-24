@@ -137,6 +137,8 @@ typedef struct {
     int    region;     /* 0 whole disk 1 1 GiB 2 32 MiB                        */
     double flip;
     double scale;      /* time_scale: wall seconds per drive second            */
+    int    env;        /* vibration environment: 0 off, env_mix_t 1..4         */
+    int    policy;     /* write protection: FW_VIB_*                           */
 } run_params_t;
 
 typedef struct {
@@ -197,6 +199,8 @@ static void sim_scale_defaults(run_params_t *rp)
     rp->region = 0;
     rp->flip = 0.0;
     rp->scale = 10.0;
+    rp->env = 0;
+    rp->policy = 0;
 }
 
 /* ---- geometry: LBA -> cell ----------------------------------------------------------- */
@@ -404,6 +408,25 @@ static void on_trace(void *ctx, const fw_trace_t *ev)
                  ev->sim_ms, (unsigned long long)ev->lba, ev->recovered);
         bus_push(buf);
         break;
+    case FW_TRACE_VIBRATION: {
+        /* One per classifier window (every 16 ms of drive time). Threshold
+         * interrupts can fire every sample during a shock: at most one per
+         * 5 ms of drive time reaches the browser. */
+        static double last_irq_ms = -1e9;
+        if (ev->vib_class == 255) {
+            if (ev->sim_ms - last_irq_ms < 5.0)
+                break;
+            last_irq_ms = ev->sim_ms;
+        }
+        snprintf(buf, sizeof(buf),
+                 "{\"type\":\"vib\",\"t\":%.3f,\"cls\":%d,\"conf\":%u,\"rms\":%u,\"peak\":%u,"
+                 "\"inh\":%d,\"prot\":%d,\"until\":%.3f}",
+                 ev->sim_ms, ev->vib_class == 255 ? -1 : (int)ev->vib_class, ev->vib_conf,
+                 ev->vib_rms_mg, ev->vib_peak_mg, ev->vib_inhibit, ev->vib_protect,
+                 ev->vib_inhibit_until_ms);
+        bus_push(buf);
+        break;
+    }
     }
     pthread_mutex_unlock(&S.mu);
 }
@@ -416,9 +439,9 @@ static void publish_state_locked(void)
     char buf[512];
     snprintf(buf, sizeof(buf),
              "{\"type\":\"state\",\"phase\":\"%s\",\"workload\":%d,\"mode\":%d,\"qd\":%d,"
-             "\"sorted\":%d,\"region\":%d,\"flip\":%g,\"scale\":%g}",
+             "\"sorted\":%d,\"region\":%d,\"flip\":%g,\"scale\":%g,\"env\":%d,\"policy\":%d}",
              names[S.phase], S.rp.workload, S.rp.mode, S.rp.qd, S.rp.sorted, S.rp.region,
-             S.rp.flip, S.rp.scale);
+             S.rp.flip, S.rp.scale, S.rp.env, S.rp.policy);
     bus_push(buf);
 }
 
@@ -433,6 +456,10 @@ static fw_t *open_drive(const run_params_t *rp, int create, int traced)
     cfg.write_cache = rp->mode != 1;
     cfg.trace = traced ? on_trace : NULL;
     cfg.idle_destage_ms = traced ? 50.0 : 0.0;
+    /* The vibration environment only exists for the live run; the reboot
+     * verifier reads back in a quiet room. */
+    cfg.vib_env = traced ? rp->env : 0;
+    cfg.vib_policy = traced ? rp->policy : 0;
     return fw_create(&cfg, NULL);
 }
 
@@ -775,7 +802,8 @@ static void *runner_main(void *arg)
             /* Settings that live in the drive's config need a power cycle
              * (clean: everything is destaged first); the write cache mode
              * is switched with a real SET FEATURES command instead. */
-            if (want.scale != cur.scale || want.sorted != cur.sorted || want.flip != cur.flip) {
+            if (want.scale != cur.scale || want.sorted != cur.sorted || want.flip != cur.flip ||
+                want.env != cur.env || want.policy != cur.policy) {
                 pthread_mutex_lock(&S.mu);
                 S.fw = NULL;
                 pthread_mutex_unlock(&S.mu);
@@ -918,7 +946,10 @@ static void *ticker_main(void *arg)
                   "\"p99\":%.4f,\"hit\":%.2f,\"dirty\":%zu,\"cache\":%zu,\"destage_runs\":%llu,"
                   "\"destaged\":%llu,\"mreads\":%llu,\"mwrites\":%llu,\"busy\":%.1f,\"crc\":%llu,"
                   "\"crc_ok\":%llu,\"crc_bad\":%llu,\"flips\":%llu,\"cmds\":%llu,\"acked\":%llu,"
-                  "\"errors\":%llu,\"flushes\":%llu,\"realloc\":%llu,\"tags\":\"%s\"}",
+                  "\"errors\":%llu,\"flushes\":%llu,\"realloc\":%llu,\"tags\":\"%s\","
+                  "\"offtrack\":%llu,\"vwin\":%llu,\"vcls\":[%llu,%llu,%llu,%llu],\"virq\":%llu,"
+                  "\"vinh\":%llu,\"vstall\":%.1f,\"vfalse\":%.1f,\"vverify\":%llu,"
+                  "\"vrewrite\":%llu,\"vabort\":%llu,\"vrel\":%llu}",
                   sim, iops, n ? avg / (double)n : 0, p50, p95, p99,
                   rd ? 100.0 * (double)st.read_hit_sectors / (double)rd : -1.0, st.cache_dirty,
                   S.base.cache_entries, (unsigned long long)st.destage_runs,
@@ -928,7 +959,18 @@ static void *ticker_main(void *arg)
                   (unsigned long long)st.crc_unrecovered, (unsigned long long)st.transient_flips,
                   (unsigned long long)S.cmds_done, (unsigned long long)S.acked_writes,
                   (unsigned long long)S.errors, (unsigned long long)S.flushes_done,
-                  (unsigned long long)st.reallocations, S.tags);
+                  (unsigned long long)st.reallocations, S.tags,
+                  (unsigned long long)st.vib_offtrack_sectors, (unsigned long long)st.vib_windows,
+                  (unsigned long long)st.vib_class_windows[0],
+                  (unsigned long long)st.vib_class_windows[1],
+                  (unsigned long long)st.vib_class_windows[2],
+                  (unsigned long long)st.vib_class_windows[3],
+                  (unsigned long long)st.vib_shock_irqs, (unsigned long long)st.vib_inhibits,
+                  st.vib_stall_ms, st.vib_false_stall_ms,
+                  (unsigned long long)st.vib_verified_writes,
+                  (unsigned long long)st.vib_verify_rewrites,
+                  (unsigned long long)st.vib_write_aborts,
+                  (unsigned long long)st.vib_early_releases);
         bus_push(j.p);
         free(j.p);
         pthread_mutex_unlock(&S.mu);
@@ -1097,6 +1139,8 @@ static void api(int fd, const char *what, const char *q)
         rp.region = (int)qnum(q, "region", rp.region, 0, 2);
         rp.flip = qnum(q, "flip", rp.flip, 0, 0.2);
         rp.scale = qnum(q, "scale", rp.scale, 1, 200);
+        rp.env = (int)qnum(q, "env", rp.env, 0, 4);
+        rp.policy = (int)qnum(q, "policy", rp.policy, 0, 3);
         S.req_rp = rp;
         S.req_start = 1;
     } else if (!strcmp(what, "stop")) {

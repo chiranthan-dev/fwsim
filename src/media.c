@@ -626,7 +626,7 @@ out:
 
 static fw_status_t env_write(media_t *m, uint64_t lba, uint32_t n, const void *buf)
 {
-    double stalled = 0.0;
+    double stall_deadline = -1.0;   /* set at the first stall */
     unsigned aborts = 0;
     int gave_up = 0;
     for (;;) {
@@ -637,13 +637,18 @@ static fw_status_t env_write(media_t *m, uint64_t lba, uint32_t n, const void *b
 
         /* 1. Inhibit active: wait (bounded) before touching the media. */
         if (!gave_up && pol.inhibit_until_ms > t0) {
-            if (stalled < MEDIA_MAX_STALL_MS) {
+            /* A fixed deadline, not a running sum of stall times: summing
+             * many short stalls in floating point can leave a remainder
+             * smaller than the clock's resolution, and the loop would then
+             * stall for zero time forever. */
+            if (stall_deadline < 0.0)
+                stall_deadline = t0 + MEDIA_MAX_STALL_MS;
+            if (t0 < stall_deadline) {
                 double until = pol.inhibit_until_ms;
-                if (until > t0 + (MEDIA_MAX_STALL_MS - stalled))
-                    until = t0 + (MEDIA_MAX_STALL_MS - stalled);
+                if (until > stall_deadline)
+                    until = stall_deadline;
                 int ok = idle_until(m, until);
                 account_stall(m, t0, until);
-                stalled += until - t0;
                 if (!ok)
                     return FW_ERR_ABORTED;
                 continue;               /* re-ask: the inhibit may have grown */
@@ -756,6 +761,11 @@ fw_status_t media_write(media_t *m, uint64_t lba, uint32_t n, const void *buf)
     ctr_add(&m->ctr->media_writes, 1);
     ctr_add(&m->ctr->media_sectors_written, n);
     return FW_OK;
+}
+
+double media_now_ms(media_t *m)
+{
+    return sim_now(m);
 }
 
 int media_inject_bitflip(media_t *m, uint64_t lba, int bit)

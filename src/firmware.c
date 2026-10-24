@@ -23,6 +23,7 @@
 
 #include "cache.h"
 #include "clock.h"
+#include "env_monitor.h"
 #include "media.h"
 #include "squeue.h"
 
@@ -64,6 +65,7 @@ struct fw {
     uint64_t        capacity;
     uint32_t        ss;             /* sector size                           */
     size_t          high_wm, low_wm;
+    env_monitor_t  *vib;            /* shock/vibration monitor; NULL = off   */
 
     fw_counters_t   ctr;
 };
@@ -543,6 +545,11 @@ static void process(fw_t *fw, fw_cmd_t *cmd)
     if (plan_active(fw))
         plan_step(fw, fw->cfg.destage_runs_per_cmd ? fw->cfg.destage_runs_per_cmd : 1);
     update_cache_gauges(fw);
+    /* Service the vibration monitor up to now even when no write asked
+     * for it (reads move the clock too). Same outcome as servicing it at
+     * the next write; it keeps the dashboard's classifier live. */
+    if (fw->vib)
+        envmon_poll(fw->vib, media_now_ms(&fw->media));
 }
 
 static uint64_t idle_wait_ns(fw_t *fw)
@@ -585,6 +592,10 @@ static void *fw_main(void *arg)
             (void)destage_all(fw);   /* like STANDBY IMMEDIATE */
             break;
         }
+        /* Real-time playback: the sensor keeps sampling while the host is
+         * idle, so keep the monitor's bottom half running. */
+        if (fw->vib && fw->cfg.time_scale > 0.0)
+            envmon_poll(fw->vib, media_now_ms(&fw->media));
         /* Queue empty and a plan pending: one run at a time, so a command
          * arriving now waits for at most one media write. */
         if (plan_active(fw)) {
@@ -629,6 +640,16 @@ fw_t *fw_create(const fw_config_t *cfg, int *err)
     rc = media_open(&fw->media, &fw->cfg, &fw->power_on, &fw->ctr);
     if (rc != 0)
         goto fail_free;
+    if (cfg->vib_env && cfg->vib_policy != FW_VIB_NONE) {
+        /* The shock/vibration monitor steers the media write path through
+         * its write gate (media.h). Without a policy there is no gate. */
+        rc = -EINVAL;
+        fw->vib = envmon_create(&fw->media, &fw->cfg, &fw->ctr);
+        if (!fw->vib)
+            goto fail_media;
+        fw->media.wgate = envmon_gate;
+        fw->media.wgate_ctx = fw->vib;
+    }
     fw->capacity = fw->media.capacity;
     fw->ss = fw->media.sector_size;
 
@@ -672,6 +693,7 @@ fail_cache:
     free(fw->xfer);
     cache_free(&fw->cache);
 fail_media:
+    envmon_destroy(fw->vib);
     media_close(&fw->media);
 fail_free:
     if (fw)
@@ -784,6 +806,7 @@ void fw_destroy(fw_t *fw)
     free(fw->plan);
     free(fw->xfer);
     cache_free(&fw->cache);
+    envmon_destroy(fw->vib);   /* before media_close: it reads media's env */
     media_close(&fw->media);
     free(fw->media_path);
     free(fw);
@@ -829,6 +852,13 @@ void fw_get_stats(fw_t *fw, fw_stats_t *o)
     o->vib_extra_settles = ctr_get(&c->vib_extra_settles);
     o->vib_verified_writes = ctr_get(&c->vib_verified_writes);
     o->vib_verify_rewrites = ctr_get(&c->vib_verify_rewrites);
+    o->vib_windows = ctr_get(&c->vib_windows);
+    for (int k = 0; k < 4; k++)
+        o->vib_class_windows[k] = ctr_get(&c->vib_class_windows[k]);
+    o->vib_shock_irqs = ctr_get(&c->vib_shock_irqs);
+    o->vib_inhibits = ctr_get(&c->vib_inhibits);
+    o->vib_early_releases = ctr_get(&c->vib_early_releases);
+    o->vib_isr_runs = fw->vib ? envmon_isr_runs(fw->vib) : 0;   /* vib: set before start */
 }
 
 uint64_t fw_capacity(const fw_t *fw)    { return fw->capacity; }
