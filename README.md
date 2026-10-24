@@ -502,7 +502,7 @@ A 32-entry ring holds one sample per simulated day, which gives the 7- and
   scikit-learn model in 100% of rows (max probability error 0.0011).
 - **Why int16 weights:** int8 was measured first and cost up to 3.8
   percentage points of probability.
-- **Cost:** 602 bytes of tables; about 15 ns per inference (~275 ns with feature computation; varies run to run) on the host CPU
+- **Cost:** 602 bytes of tables; 10-18 ns per inference (150-275 ns including feature computation; it varies between runs on a shared VM) on the host CPU
   (not drive-controller timing).
 
 `FW_OP_SMART_READ` returns the attribute table, the risk and the flag. While

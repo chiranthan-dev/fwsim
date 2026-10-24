@@ -100,7 +100,7 @@ be 99.8% for "never fails" on the time split, so it is not reported.
 | Time split (350,500 drives, 843 failed) | PR-AUC | Recall at 1% false alarms |
 |---|---:|---:|
 | Baseline rule, graded (sum of raw 5/187/188/197/198) | 0.033 | 12.2% |
-| **LR, deployable (this model)** | **0.189** (0.161–0.217) | **52.9%** (49–57%) |
+| **LR, deployable (this model)** | **0.189** (0.164–0.218) | **52.9%** (50–56%) |
 | LR, all features | 0.196 | 52.6% |
 | GBT, all features | 0.208 | 60.1% |
 
@@ -148,7 +148,7 @@ not improve (48.7% vs 51.3%). The full table is in `results/smart/results.md`.
   costs 17 more bytes.
 - Size: 602 bytes of tables (34 B weights, 34 B zero points, 514 B LUT,
   20 B constants), plus 1,608 bytes of per-drive state (32-day history
-  ring). Host CPU (x86-64 under WSL2, *not* a drive controller): 15-18 ns
+  ring). Host CPU (x86-64 under WSL2, *not* a drive controller): 10-18 ns
   per logit, 150-275 ns including feature computation (varies between runs).
 
 ## Known failure modes and caveats

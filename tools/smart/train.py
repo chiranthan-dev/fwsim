@@ -116,7 +116,8 @@ def sample_train_rows(con, where: str, neg_rate: float, seed: int) -> pd.DataFra
         SELECT {RAW_SELECT}, y FROM f
         WHERE {where}
           AND (y = 1 OR md5_number(serial_number || strftime(date, '%Y%m%d') || '{seed}')
-                        % 1000000 < {cut})"""
+                        % 1000000 < {cut})
+        ORDER BY serial_number, date   -- fixed order: bit-reproducible fits"""
     return con.execute(q).df()
 
 
@@ -127,13 +128,13 @@ def drive_labels(con, where: str, a, b) -> pd.DataFrame:
                max(CASE WHEN fail_date BETWEEN DATE '{a.date()}' AND DATE '{hi}'
                         THEN 1 ELSE 0 END)::TINYINT AS y,
                count(*) AS days
-        FROM f WHERE {where} GROUP BY serial_number"""
+        FROM f WHERE {where} GROUP BY serial_number ORDER BY serial_number"""
     return con.execute(q).df().set_index("serial_number")
 
 
 def drive_scores(con, where: str, models, dump=None) -> pd.DataFrame:
     """Max daily score per drive over the rows matching `where` (streamed)."""
-    reader = con.sql(f"SELECT {RAW_SELECT}, y FROM f WHERE {where}").to_arrow_reader(1_000_000)
+    reader = con.sql(f"SELECT {RAW_SELECT}, y FROM f WHERE {where} ORDER BY serial_number, date").to_arrow_reader(1_000_000)
     parts = []
     for batch in reader:
         df = batch.to_pandas()

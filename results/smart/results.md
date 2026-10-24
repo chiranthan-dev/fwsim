@@ -10,10 +10,10 @@ Baseline rule (any raw > 0) as a single operating point: recall **83.5%** at **8
 
 | Model | PR-AUC (95% CI) | Recall at 1% false alarms (95% CI) | Recall at the rule's 8.6% false alarms |
 |---|---:|---:|---:|
-| Baseline rule, graded (sum of raw 5/187/188/197/198) | 0.103 (0.090-0.120) | 11.0% (8-16%) | 83.5% |
-| Logistic regression, deployable features (in fwsim) | 0.358 (0.312-0.410) | 61.4% (56-66%) | 84.6% |
-| Logistic regression, all features | 0.359 (0.314-0.414) | 59.9% (56-64%) | 84.4% |
-| Gradient-boosted trees (60 x depth 3), all features | 0.396 (0.349-0.449) | 65.0% (60-70%) | 85.4% |
+| Baseline rule, graded (sum of raw 5/187/188/197/198) | 0.103 (0.091-0.118) | 11.0% (9-16%) | 83.5% |
+| Logistic regression, deployable features (in fwsim) | 0.358 (0.319-0.411) | 61.4% (57-65%) | 84.6% |
+| Logistic regression, all features | 0.359 (0.318-0.410) | 59.9% (55-64%) | 84.4% |
+| Gradient-boosted trees (60 x depth 3), all features | 0.396 (0.357-0.453) | 65.0% (60-69%) | 85.4% |
 
 ![PR curves, serial split](pr_serial.png)
 
@@ -25,10 +25,10 @@ Baseline rule (any raw > 0) as a single operating point: recall **76.5%** at **8
 
 | Model | PR-AUC (95% CI) | Recall at 1% false alarms (95% CI) | Recall at the rule's 8.5% false alarms |
 |---|---:|---:|---:|
-| Baseline rule, graded (sum of raw 5/187/188/197/198) | 0.033 (0.029-0.038) | 12.2% (10-15%) | 76.5% |
-| Logistic regression, deployable features (in fwsim) | 0.189 (0.161-0.217) | 52.9% (49-56%) | 77.8% |
-| Logistic regression, all features | 0.196 (0.165-0.220) | 52.6% (49-55%) | 78.3% |
-| Gradient-boosted trees (60 x depth 3), all features | 0.208 (0.181-0.240) | 60.1% (57-63%) | 80.1% |
+| Baseline rule, graded (sum of raw 5/187/188/197/198) | 0.033 (0.029-0.038) | 12.2% (10-14%) | 76.5% |
+| Logistic regression, deployable features (in fwsim) | 0.189 (0.164-0.218) | 52.9% (50-56%) | 77.8% |
+| Logistic regression, all features | 0.196 (0.172-0.227) | 52.6% (49-55%) | 78.3% |
+| Gradient-boosted trees (60 x depth 3), all features | 0.208 (0.181-0.242) | 60.1% (57-63%) | 80.1% |
 
 Deployed threshold (chosen for 1% false alarms on a 31-day window of the TRAINING period, never the test set; log-odds -2.98, i.e. flag at a predicted 4.8% chance of failing within 30 days): on the test window recall **53.9%** at **1.1%** false alarms (precision 10.7%).
 
@@ -41,9 +41,9 @@ Deployed threshold (chosen for 1% false alarms on a 31-day window of the TRAININ
 | Group | Drives | Failed | Rule recall / false alarms | LR-deploy PR-AUC | LR-full PR-AUC | GBT PR-AUC | Graded-rule recall @1% | LR-deploy recall @1% | GBT recall @1% |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | HGST | 5,374 | 100 | 95.0% / 10.0% | 0.389 | 0.387 | 0.353 | 39.0% | 35.0% | 30.0% |
-| Seagate | 22,677 | 183 | 81.4% / 15.1% | 0.470 | 0.467 | 0.483 | 20.2% | 70.5% | 70.5% |
-| Toshiba | 25,246 | 126 | 77.8% / 5.9% | 0.327 | 0.327 | 0.428 | 42.1% | 58.7% | 59.5% |
-| WDC | 17,737 | 65 | 83.1% / 3.7% | 0.202 | 0.207 | 0.220 | 58.5% | 56.9% | 47.7% |
+| Seagate | 22,677 | 183 | 81.4% / 15.1% | 0.470 | 0.467 | 0.484 | 20.2% | 70.5% | 70.5% |
+| Toshiba | 25,246 | 126 | 77.8% / 5.9% | 0.327 | 0.327 | 0.427 | 42.1% | 58.7% | 59.5% |
+| WDC | 17,737 | 65 | 83.1% / 3.7% | 0.202 | 0.207 | 0.220 | 58.5% | 56.9% | 49.2% |
 | &nbsp;&nbsp;Toshiba TOSHIBA MG08ACA16TA | 8,102 | 40 | 70.0% / 10.3% | 0.384 | 0.375 | 0.373 | 45.0% | 45.0% | 45.0% |
 | &nbsp;&nbsp;Toshiba TOSHIBA MG07ACA14TA | 7,501 | 51 | 94.1% / 3.4% | 0.581 | 0.591 | 0.643 | 80.4% | 84.3% | 82.4% |
 | &nbsp;&nbsp;Toshiba TOSHIBA MG10ACA20TE | 5,063 | 13 | 76.9% / 1.2% | 0.618 | 0.605 | 0.551 | 76.9% | 69.2% | 69.2% |
@@ -79,8 +79,8 @@ Deployed threshold (chosen for 1% false alarms on a 31-day window of the TRAININ
 ## Model size and inference time
 
 - model tables: **602 bytes** (34 B int16 weights + 34 B zero points + 514 B sigmoid LUT + constants); per-drive state 1608 bytes (32-day history)
-- GBT for comparison: 896 tree nodes (not exported)
-- **host CPU** (x86-64 under WSL2, not a drive controller): logit 14.9 ns/call, logit + risk 20.3 ns, features + logit + risk 274.4 ns
+- GBT for comparison: 892 tree nodes (not exported)
+- **host CPU** (x86-64 under WSL2, not a drive controller): logit 9.6 ns/call, logit + risk 14.3 ns, features + logit + risk 216.5 ns
 
 ## Deployment demo (synthetic counters)
 
