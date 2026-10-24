@@ -1,0 +1,26 @@
+{
+ "64": {
+  "test_windows": 74880,
+  "c_int8_mlp_vs_python_float_mlp": 0.9986244658119658,
+  "c_int8_mlp_vs_python_int8_sim": 1.0,
+  "c_tree_vs_sklearn_tree": 1.0,
+  "c_int8_mlp_accuracy": 0.9836672008547008,
+  "python_float_mlp_accuracy": 0.9841613247863248
+ },
+ "128": {
+  "test_windows": 74720,
+  "c_int8_mlp_vs_python_float_mlp": 0.9991970021413277,
+  "c_int8_mlp_vs_python_int8_sim": 1.0,
+  "c_tree_vs_sklearn_tree": 1.0,
+  "c_int8_mlp_accuracy": 0.9828426124197002,
+  "python_float_mlp_accuracy": 0.9829496788008565
+ },
+ "256": {
+  "test_windows": 74400,
+  "c_int8_mlp_vs_python_float_mlp": 0.9990456989247312,
+  "c_int8_mlp_vs_python_int8_sim": 1.0,
+  "c_tree_vs_sklearn_tree": 1.0,
+  "c_int8_mlp_accuracy": 0.9762231182795699,
+  "python_float_mlp_accuracy": 0.9763306451612903
+ }
+}

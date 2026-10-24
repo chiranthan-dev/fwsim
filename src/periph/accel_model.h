@@ -102,6 +102,8 @@
 #define ACCEL_ODR_1000HZ  2u
 #define ACCEL_FIFO_DEPTH  128u
 #define ACCEL_OVERSAMPLE  4u
+#define ACCEL_NOISE_MG_DEFAULT 2.0   /* sensor noise RMS used by the drive */
+#define ACCEL_RNG_SALT    0x616363656C5F6E6Full   /* seed ^ this = noise RNG */
 
 /* The physical acceleration (mg) at simulated time t_us. */
 typedef double (*accel_source_fn)(void *ctx, uint64_t t_us);

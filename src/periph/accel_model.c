@@ -31,7 +31,7 @@ void accel_model_init(accel_model_t *a, accel_source_fn src, void *src_ctx,
     a->src = src;
     a->src_ctx = src_ctx;
     a->noise_mg = noise_mg;
-    a->rng = seed ^ 0x616363656C5F6E6Full;
+    a->rng = seed ^ ACCEL_RNG_SALT;
     a->pin_cb = pin_cb;
     a->pin_ctx = pin_ctx;
     reset_regs(a);

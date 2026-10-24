@@ -77,7 +77,8 @@ FW_SRCS = src/clock.c src/crc32.c src/status.c src/ring_mutex.c src/ring_spsc.c 
           src/hal/mmio.c src/hal/irq.c \
           src/periph/spi_ctrl.c src/periph/gpio_ctrl.c src/periph/accel_model.c \
           src/periph/board.c src/periph/env_sim.c \
-          src/drivers/spi.c src/drivers/gpio.c src/drivers/accel.c
+          src/drivers/spi.c src/drivers/gpio.c src/drivers/accel.c \
+          src/edgeai/features.c src/edgeai/infer.c
 FW_OBJS = $(FW_SRCS:%.c=$(BUILD)/%.o)
 FW_LIB  = $(BUILD)/libfwsim.a
 
@@ -87,6 +88,7 @@ TEST_BINS = $(TESTS:%=$(BUILD)/tests/%)
 CLI       = $(BUILD)/fwsim
 BENCH     = $(BUILD)/fwbench
 UI        = $(BUILD)/fwsim-ui
+EDGEAI    = $(BUILD)/edgeai_cli
 UI_PORT  ?= 8080
 
 # Sanitizer runtime options: fail loudly on the first report.
@@ -103,11 +105,11 @@ else
   RUN =
 endif
 
-.PHONY: all lib test asan tsan bench run-tests clean ui run-ui
+.PHONY: all lib test asan tsan bench run-tests clean ui run-ui nofloat edgeai-train
 # Keep object files that make would otherwise treat as intermediates.
 .SECONDARY:
 
-all: $(CLI) $(BENCH) $(UI)
+all: $(CLI) $(BENCH) $(UI) $(EDGEAI)
 
 ui: $(UI)
 
@@ -142,6 +144,30 @@ $(UI): $(BUILD)/ui/server.o $(FW_LIB) $(DS_LIB)
 
 $(BUILD)/tests/%: $(BUILD)/tests/%.o $(FW_LIB) $(DS_LIB)
 	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+$(EDGEAI): $(BUILD)/tools/edgeai/edgeai_cli.o $(FW_LIB) $(DS_LIB)
+	$(CC) $(LDFLAGS) $^ $(LDLIBS) -o $@
+
+# The classifier's inference path must not use floating point (an MCU
+# without an FPU, and no FPU state to save in the bottom half). The x86
+# -mgeneral-regs-only flag turns any float/double code into a compile error.
+nofloat:
+	$(CC) $(CPPFLAGS) -std=c11 $(WARN) -O2 -mgeneral-regs-only -fsyntax-only \
+	    src/edgeai/features.c src/edgeai/infer.c
+	@echo "nofloat: features.c and infer.c compile without floating-point registers"
+
+# Retrain and re-export the classifier (needs Python 3 + scikit-learn).
+# Regenerates src/edgeai/model_data.h, tests/data/edgeai_golden_*.csv and
+# results/edgeai/train_report.*. PYTHON_TRAIN may differ from PYTHON, e.g.
+# a Windows Python that runs this WSL-built CLI through `wsl -e`.
+PYTHON_TRAIN ?= $(PYTHON)
+EDGEAI_CLI_CMD ?= ./build/lockfree/edgeai_cli
+edgeai-train:
+	$(MAKE) --no-print-directory QUEUE=lockfree SAN= build/lockfree/edgeai_cli
+	$(PYTHON_TRAIN) tools/edgeai/train.py --cli "$(EDGEAI_CLI_CMD)"
+	$(PYTHON_TRAIN) tools/edgeai/export.py
+	$(MAKE) --no-print-directory QUEUE=lockfree SAN= build/lockfree/edgeai_cli
+	$(PYTHON_TRAIN) tools/edgeai/export.py --check-c --cli "$(EDGEAI_CLI_CMD)"
 
 # Run the suite in the current (QUEUE, SAN) configuration, then a short
 # end-to-end CLI run of each workload type so the sanitizers also see the
@@ -181,4 +207,4 @@ clean:
 	rm -rf build
 
 -include $(FW_OBJS:.o=.d) $(DS_OBJS:.o=.d) $(BUILD)/src/main.d $(BUILD)/bench/bench.d $(BUILD)/ui/server.d \
-         $(TEST_BINS:=.d)
+         $(TEST_BINS:=.d) $(BUILD)/tools/edgeai/edgeai_cli.d
