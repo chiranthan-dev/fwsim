@@ -479,7 +479,7 @@ function connect() {
 
 async function replay() {
   for (const id of ['btn-run', 'btn-stop', 'btn-flush', 'btn-plug', 'btn-reset']) $(id).disabled = true;
-  $('hint').textContent = 'Replay of a real recorded session (scripted: write-back run, power cut, write-through run, power cut). Run "make run-ui" locally to drive the live firmware yourself.';
+  $('hint').textContent = 'Replay of a real recorded session (scripted: write-back run, power cut, write-through run, power cut, then write-through in a synthetic vibration environment with the Edge AI hybrid write protection). Run "make run-ui" locally to drive the live firmware yourself.';
   let data;
   try { data = await (await fetch('demo-events.json')).json(); } catch { $('status-text').textContent = 'NO RECORDING'; return; }
   const evs = data.events, start = performance.now();

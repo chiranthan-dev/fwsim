@@ -209,8 +209,11 @@ is the same page in replay mode: it plays back
 [ui/static/demo-events.json](ui/static/demo-events.json), a real session
 that [ui/record.py](ui/record.py) recorded from `fwsim-ui` (every event with
 its original timing), through the same event handler the live stream uses.
-Open `http://localhost:8080/?replay` to see the replay locally. The README
-animation consists of real screenshots of that replay, captured with headless
+Open `http://localhost:8080/?replay` to see the replay locally. Its last
+phase is a write-through run in the synthetic mixed vibration environment
+with the hybrid (P3) write protection, so the "Vibration monitor" card
+shows real classifier output. The README animation (recorded before that
+phase existed) consists of real screenshots of the replay, captured with headless
 Edge/Chrome ([docs/capture_dashboard.mjs](docs/capture_dashboard.mjs)) and
 assembled by [docs/make_gif.py](docs/make_gif.py).
 

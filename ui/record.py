@@ -28,8 +28,13 @@ SCRIPT = [
     (16.0, "cut"),
     (22.0, "start?workload=0&mode=1&qd=4&sorted=1&region=0&flip=0&scale=10"),
     (31.0, "cut"),
+    # Edge AI: write-through random writes in the synthetic mixed vibration
+    # environment under the hybrid policy, at 1/4 speed so the 20 s cover
+    # ~5 s of drive time (several environment segments).
+    (37.0, "start?workload=0&mode=1&qd=4&sorted=1&region=1&flip=0&scale=4&env=4&policy=3"),
+    (57.0, "stop"),
 ]
-END = 36.0
+END = 60.0
 
 events = []
 t0 = time.monotonic()
