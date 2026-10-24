@@ -83,7 +83,7 @@ FW_OBJS = $(FW_SRCS:%.c=$(BUILD)/%.o)
 FW_LIB  = $(BUILD)/libfwsim.a
 
 TESTS     = test_crc test_ring test_cache test_dispatch test_integrity test_powerloss \
-            test_drivers test_env
+            test_drivers test_env test_edgeai
 TEST_BINS = $(TESTS:%=$(BUILD)/tests/%)
 CLI       = $(BUILD)/fwsim
 BENCH     = $(BUILD)/fwbench
