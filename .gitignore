@@ -5,3 +5,7 @@ docs/frames/
 # Private study guides: kept locally, not published
 LEARNING.md
 INTERVIEW.md
+# SMART pipeline: Backblaze raw data (GBs) and the local venv stay out of git
+tools/smart/data/
+tools/smart/.venv/
+.pytest_cache/
