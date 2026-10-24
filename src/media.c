@@ -5,6 +5,7 @@
 
 #include <errno.h>
 #include <fcntl.h>
+#include <math.h>
 #include <stdlib.h>
 #include <string.h>
 #include <sys/stat.h>
@@ -163,6 +164,17 @@ int media_open(media_t *m, const fw_config_t *cfg, const atomic_int *power_on,
     if (!m->recbuf)
         goto fail;
 
+    if (cfg->vib_env != ENV_MIX_OFF) {
+        uint64_t s = cfg->vib_seed ? cfg->vib_seed : cfg->seed;
+        m->env = malloc(sizeof(*m->env));
+        if (!m->env || env_init(m->env, (env_mix_t)cfg->vib_env, s) != 0) {
+            free(m->env);
+            m->env = NULL;
+            goto fail;
+        }
+        m->ot_rng = s ^ 0x6F66667472616B00ull;
+    }
+
     int flags = O_RDWR | O_CREAT | (cfg->media_create ? O_TRUNC : 0);
     m->fd = open(cfg->media_path, flags, 0644);
     if (m->fd < 0)
@@ -192,6 +204,11 @@ void media_close(media_t *m)
     m->recbuf = NULL;
     free(m->pending);
     m->pending = NULL;
+    if (m->env) {
+        env_free(m->env);
+        free(m->env);
+        m->env = NULL;
+    }
 }
 
 /* ---- pending (unrecoverable) sectors --------------------------------------
@@ -466,12 +483,245 @@ static int write_records(media_t *m, uint64_t lba, uint32_t n, const uint8_t *sr
     return 0;
 }
 
+/* ---- the mechanical environment (only when cfg.vib_env is on) -------------------
+ *
+ * The physics are in periph/env_sim.h; this is where they meet the write
+ * path. For every sector we know the simulated instant it passes under the
+ * head, so we ask the environment how far the head is displaced at that
+ * instant, turn that into an off-track probability, and draw. An off-track
+ * sector is stored CORRUPTED: its record fails CRC on every later read
+ * (MEDIUM ERROR after retries), so the damage is always detected.
+ */
+
+static uint64_t ms_to_us(double ms)
+{
+    return ms <= 0.0 ? 0 : (uint64_t)(ms * 1000.0);
+}
+
+/* Is the sector written at t_ms off-track? tau_ms = time since the end of
+ * the seek that brought the head here, or < 0 if there was no seek. One
+ * RNG draw per sector, always, so the stream does not depend on outcomes. */
+static int draw_offtrack(media_t *m, double t_ms, double tau_ms)
+{
+    double d = fabs(env_disp_pct(m->env, ms_to_us(t_ms)));
+    if (tau_ms >= 0.0)
+        d += env_settle_residual_pct(tau_ms);
+    double p = env_offtrack_prob(d);
+    return rng_unit64(&m->ot_rng) < p;
+}
+
+/* Damage a record so it is guaranteed to fail CRC: XOR a non-zero 32-bit
+ * pattern into 4 consecutive data bytes. CRC-32 detects every error burst
+ * of 32 bits or less, so this can never alias to a valid record. */
+static void corrupt_record(media_t *m, uint8_t *rec)
+{
+    uint64_t r = rng_next64(&m->ot_rng);
+    uint32_t pat = (uint32_t)r | 1u;
+    size_t off = (size_t)((r >> 32) % (m->sector_size - 3));
+    for (int k = 0; k < 4; k++)
+        rec[off + (size_t)k] ^= (uint8_t)(pat >> (8 * k));
+    if (all_zero(rec, m->rec_size))      /* would read as "never written" */
+        rec[0] ^= 1;
+}
+
+/* Write records for sectors idx[0..cnt) of the command (all of them when
+ * idx == NULL), sector k passing under the head at t_first + k * per_ms. */
+static int write_records_env(media_t *m, uint64_t lba, const uint8_t *src, const uint32_t *idx,
+                             uint32_t cnt, double t_first, double per_ms, double tau_first)
+{
+    for (uint32_t j = 0; j < cnt; j++) {
+        uint32_t k = idx ? idx[j] : j;
+        uint8_t *rec = m->recbuf;
+        const uint8_t *d = src + (size_t)k * m->sector_size;
+        memcpy(rec, d, m->sector_size);
+        put_le32(rec + m->sector_size, sector_crc(d, m->sector_size, lba + k));
+        double dt = (double)j * per_ms;
+        if (draw_offtrack(m, t_first + dt, tau_first < 0.0 ? -1.0 : tau_first + dt)) {
+            corrupt_record(m, rec);
+            ctr_add(&m->ctr->vib_offtrack_sectors, 1);
+        }
+        if (pwrite_full(m->fd, rec, m->rec_size, rec_offset(m, lba + k)) != 0)
+            return -1;
+    }
+    return 0;
+}
+
+/* Let simulated time pass with the head idle (a write inhibit). */
+static int idle_until(media_t *m, double t_ms)
+{
+    if (m->time_scale > 0.0) {
+        uint64_t deadline = m->t0_ns + (uint64_t)(t_ms * 1e6 * m->time_scale);
+        if (delay_until(deadline, m->power_on) < deadline)
+            return 0;
+    }
+    if (t_ms > m->sim_ms)
+        m->sim_ms = t_ms;
+    return powered(m);
+}
+
+/* Stall accounting. "False" = the ground truth says nothing harmful was
+ * happening (quiet or tapping): measured on the environment's own 0.25 ms
+ * grid. This is test-bench instrumentation; no policy ever sees it. */
+static void account_stall(media_t *m, double from_ms, double to_ms)
+{
+    if (to_ms <= from_ms)
+        return;
+    double harmless = 0.0, step = 1000.0 / ENV_FS_HZ;
+    for (double t = from_ms; t < to_ms; t += step) {
+        env_class_t c = env_label(m->env, ms_to_us(t));
+        if (c == ENV_QUIET || c == ENV_TAP)
+            harmless += (t + step <= to_ms) ? step : to_ms - t;
+    }
+    ctr_add(&m->ctr->vib_stall_us, (uint64_t)((to_ms - from_ms) * 1000.0 + 0.5));
+    ctr_add(&m->ctr->vib_false_stall_us, (uint64_t)(harmless * 1000.0 + 0.5));
+}
+
+/* Verify-after-write: one revolution later the sectors come round again;
+ * read them back and rewrite (on the next revolution) any that fail CRC. */
+static fw_status_t verify_after_write(media_t *m, uint64_t lba, uint32_t n, const uint8_t *src,
+                                      uint32_t passes, double per_ms)
+{
+    uint32_t *bad = malloc((size_t)n * sizeof(*bad));
+    if (!bad)
+        return FW_ERR_HARDWARE;
+    fw_status_t st = FW_OK;
+    ctr_add(&m->ctr->vib_verified_writes, 1);
+    uint8_t *out = malloc(m->sector_size);
+    if (!out) {
+        free(bad);
+        return FW_ERR_HARDWARE;
+    }
+    for (uint32_t pass = 0; pass < passes; pass++) {
+        if (!one_revolution(m)) {
+            st = FW_ERR_ABORTED;
+            break;
+        }
+        uint32_t nbad = 0;
+        for (uint32_t k = 0; k < n; k++) {
+            if (pread_full(m->fd, m->recbuf, m->rec_size, rec_offset(m, lba + k)) != 0) {
+                st = FW_ERR_HARDWARE;
+                goto out;
+            }
+            if (!verify_record(m, m->recbuf, lba + k, out))
+                bad[nbad++] = k;
+        }
+        if (nbad == 0)
+            break;
+        if (!one_revolution(m)) {
+            st = FW_ERR_ABORTED;
+            break;
+        }
+        /* Rewrite in place: no seek, so no settle residual. */
+        ctr_add(&m->ctr->vib_verify_rewrites, nbad);
+        if (write_records_env(m, lba, src, bad, nbad, m->sim_ms, per_ms, -1.0) != 0) {
+            st = FW_ERR_WRITE_FAULT;
+            break;
+        }
+    }
+out:
+    free(out);
+    free(bad);
+    return st;
+}
+
+static fw_status_t env_write(media_t *m, uint64_t lba, uint32_t n, const void *buf)
+{
+    double stalled = 0.0;
+    unsigned aborts = 0;
+    int gave_up = 0;
+    for (;;) {
+        media_wpolicy_t pol = { 0, 0, 0 };
+        double t0 = sim_now(m);
+        if (m->wgate)
+            m->wgate(m->wgate_ctx, t0, &pol);
+
+        /* 1. Inhibit active: wait (bounded) before touching the media. */
+        if (!gave_up && pol.inhibit_until_ms > t0) {
+            if (stalled < MEDIA_MAX_STALL_MS) {
+                double until = pol.inhibit_until_ms;
+                if (until > t0 + (MEDIA_MAX_STALL_MS - stalled))
+                    until = t0 + (MEDIA_MAX_STALL_MS - stalled);
+                int ok = idle_until(m, until);
+                account_stall(m, t0, until);
+                stalled += until - t0;
+                if (!ok)
+                    return FW_ERR_ABORTED;
+                continue;               /* re-ask: the inhibit may have grown */
+            }
+            ctr_add(&m->ctr->vib_stall_timeouts, 1);
+            gave_up = 1;
+        }
+
+        /* 2. Seek and rotate. */
+        disk_timing_t t;
+        double elapsed;
+        int mr = mechanics(m, lba, n, DISK_OP_WRITE, 0, &t, &elapsed);
+        if (mr < 0)
+            return FW_ERR_HARDWARE;
+        double per_ms = t.transfer_ms / n;
+        if (mr == 0) {
+            /* Power cut part-way: the prefix that passed the head is on
+             * the platter (see media_write), subject to the same physics. */
+            double t_start = m->sim_ms - elapsed;
+            double positioning = t.seek_ms + t.rotate_ms;
+            uint32_t todo = 0;
+            if (elapsed > positioning && per_ms > 0.0) {
+                double k = (elapsed - positioning) / per_ms;
+                todo = k >= n ? n - 1 : (uint32_t)k;
+            }
+            ctr_add(&m->ctr->torn_writes, 1);
+            if (todo && write_records_env(m, lba, buf, NULL, todo, t_start + positioning,
+                                          per_ms, t.seek_ms > 0 ? t.rotate_ms : -1.0) != 0)
+                return FW_ERR_WRITE_FAULT;
+            return FW_ERR_ABORTED;
+        }
+        double t_start = m->sim_ms - t.total_ms;
+        double seek_end = t_start + t.seek_ms;
+        double t_xfer = seek_end + t.rotate_ms;
+
+        /* 3. Extra settle: the rotational wait is the settle time we get
+         * for free; if it is shorter than asked for, skip a revolution. */
+        if (pol.settle_ms > 0.0 && t.seek_ms > 0.0 && t.rotate_ms < pol.settle_ms) {
+            if (!one_revolution(m))
+                return FW_ERR_ABORTED;
+            t_xfer += m->rev_ms;
+            ctr_add(&m->ctr->vib_extra_settles, 1);
+        }
+
+        /* 4. Write gate at the instant of transfer. */
+        if (m->wgate && !gave_up && aborts < MEDIA_MAX_GATE_ABORTS) {
+            media_wpolicy_t now = { 0, 0, 0 };
+            m->wgate(m->wgate_ctx, t_xfer, &now);
+            if (now.inhibit_until_ms > t_xfer) {
+                aborts++;
+                ctr_add(&m->ctr->vib_write_aborts, 1);
+                continue;
+            }
+        }
+
+        /* 5. Transfer, sector by sector, under the environment. */
+        if (write_records_env(m, lba, buf, NULL, n, t_xfer, per_ms,
+                              t.seek_ms > 0.0 ? t_xfer - seek_end : -1.0) != 0)
+            return FW_ERR_WRITE_FAULT;
+        if (pol.verify) {
+            fw_status_t st = verify_after_write(m, lba, n, buf, pol.verify, per_ms);
+            if (st != FW_OK)
+                return st;
+        }
+        ctr_add(&m->ctr->media_writes, 1);
+        ctr_add(&m->ctr->media_sectors_written, n);
+        return FW_OK;
+    }
+}
+
 fw_status_t media_write(media_t *m, uint64_t lba, uint32_t n, const void *buf)
 {
     if (!powered(m))
         return FW_ERR_ABORTED;
 
     reallocate_pending(m, lba, n);
+    if (m->env)
+        return env_write(m, lba, n, buf);
 
     disk_timing_t t;
     double elapsed;

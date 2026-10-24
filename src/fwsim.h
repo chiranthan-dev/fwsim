@@ -195,6 +195,13 @@ typedef struct {
     uint64_t      seed;
     fw_trace_fn   trace;              /* optional observer, see above      */
     void         *trace_ctx;
+
+    /* ---- mechanical environment (README "Edge AI vibration classifier").
+     * Everything is OFF by default: with vib_env == 0 there is no
+     * environment model, no off-track physics, and the media path is
+     * exactly the one without this feature. */
+    int           vib_env;            /* env_mix_t (periph/env_sim.h); 0 = off */
+    uint64_t      vib_seed;           /* environment seed; 0 = use `seed`      */
 } fw_config_t;
 
 /* ---- statistics (a snapshot; safe to call at any time) ------------------- */
@@ -219,6 +226,17 @@ typedef struct {
     uint64_t torn_writes;                /* media writes cut short by power loss */
     size_t   cache_dirty;                /* at the time of the snapshot        */
     size_t   cache_used;
+
+    /* Mechanical environment (all zero while vib_env is off). */
+    uint64_t vib_offtrack_sectors;       /* stored off-track (ground truth)    */
+    double   vib_stall_ms;               /* writes held by a write inhibit     */
+    double   vib_false_stall_ms;         /* ... while the environment was
+                                            harmless (quiet or tapping)        */
+    uint64_t vib_stall_timeouts;         /* inhibit outlasted the stall limit  */
+    uint64_t vib_write_aborts;           /* write gate closed before transfer  */
+    uint64_t vib_extra_settles;          /* extra settle cost a revolution     */
+    uint64_t vib_verified_writes;        /* writes read back after writing     */
+    uint64_t vib_verify_rewrites;        /* sectors rewritten after a verify   */
 } fw_stats_t;
 
 typedef struct fw fw_t;

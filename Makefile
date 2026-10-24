@@ -76,13 +76,13 @@ FW_SRCS = src/clock.c src/crc32.c src/status.c src/ring_mutex.c src/ring_spsc.c 
           src/workload.c src/powerloss.c \
           src/hal/mmio.c src/hal/irq.c \
           src/periph/spi_ctrl.c src/periph/gpio_ctrl.c src/periph/accel_model.c \
-          src/periph/board.c \
+          src/periph/board.c src/periph/env_sim.c \
           src/drivers/spi.c src/drivers/gpio.c src/drivers/accel.c
 FW_OBJS = $(FW_SRCS:%.c=$(BUILD)/%.o)
 FW_LIB  = $(BUILD)/libfwsim.a
 
 TESTS     = test_crc test_ring test_cache test_dispatch test_integrity test_powerloss \
-            test_drivers
+            test_drivers test_env
 TEST_BINS = $(TESTS:%=$(BUILD)/tests/%)
 CLI       = $(BUILD)/fwsim
 BENCH     = $(BUILD)/fwbench

@@ -31,6 +31,7 @@
 
 #include "disksim.h"
 #include "fwsim.h"
+#include "periph/env_sim.h"
 #include "util.h"
 
 /* Counters shared by media.c and firmware.c; see util.h for why each is a
@@ -48,7 +49,45 @@ typedef struct {
     counter_t crc_errors, crc_retries, crc_recovered, crc_unrecovered;
     counter_t transient_flips, reallocations, torn_writes;
     counter_t cache_dirty, cache_used;
+    /* mechanical environment (media_write's environment path) */
+    counter_t vib_offtrack_sectors, vib_stall_us, vib_false_stall_us, vib_stall_timeouts;
+    counter_t vib_write_aborts, vib_extra_settles, vib_verified_writes, vib_verify_rewrites;
 } fw_counters_t;
+
+/*
+ * Write gate: how a write-protection policy (env_monitor.c) steers the
+ * media write path while an environment model is active. Before seeking,
+ * and again at the instant the transfer would start, media_write asks the
+ * gate for its current directives at simulated time t_ms; the gate first
+ * brings its own view of the sensor up to t_ms (so it can only use what
+ * the sensor has seen by then).
+ *
+ *   inhibit_until_ms  no sector may be written before this time: before
+ *                     the seek the write waits (a stall); at transfer time
+ *                     the write gate is closed - nothing is written, and
+ *                     the write is retried after the inhibit
+ *   settle_ms         minimum time from the end of a seek to the start of
+ *                     the transfer; if the rotational wait is shorter, the
+ *                     write waits one extra revolution
+ *   verify            >0: read the sectors back one revolution later and
+ *                     rewrite any that fail CRC, up to `verify` times
+ *
+ * No gate (NULL) = no protection at all (policy P0).
+ */
+typedef struct {
+    double   inhibit_until_ms;
+    double   settle_ms;
+    uint32_t verify;
+} media_wpolicy_t;
+
+typedef void (*media_wgate_fn)(void *ctx, double t_ms, media_wpolicy_t *pol);
+
+/* A write never waits longer than this for an inhibit to end (per command):
+ * firmware cannot stall a host command forever, so after this it writes
+ * anyway and counts a stall timeout. */
+#define MEDIA_MAX_STALL_MS   500.0
+/* ... and is aborted at the write gate at most this many times. */
+#define MEDIA_MAX_GATE_ABORTS 8u
 
 typedef struct {
     int         fd;
@@ -86,6 +125,14 @@ typedef struct {
     fw_trace_fn trace;
     void       *trace_ctx;
     uint8_t     io_reason;
+
+    /* Mechanical environment (NULL when cfg.vib_env is off). The model
+     * belongs to the media: it is the physical world the head lives in. */
+    env_sim_t      *env;
+    uint64_t        ot_rng;      /* off-track draws, firmware thread only */
+    media_wgate_fn  wgate;       /* write protection policy (may be NULL) */
+    void           *wgate_ctx;
+
     uint32_t    nzones;
     disk_zone_t zones[DISK_MAX_ZONES];
 } media_t;

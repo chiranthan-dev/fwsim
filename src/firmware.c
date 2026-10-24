@@ -821,6 +821,14 @@ void fw_get_stats(fw_t *fw, fw_stats_t *o)
     o->torn_writes = ctr_get(&c->torn_writes);
     o->cache_dirty = (size_t)ctr_get(&c->cache_dirty);
     o->cache_used = (size_t)ctr_get(&c->cache_used);
+    o->vib_offtrack_sectors = ctr_get(&c->vib_offtrack_sectors);
+    o->vib_stall_ms = (double)ctr_get(&c->vib_stall_us) / 1000.0;
+    o->vib_false_stall_ms = (double)ctr_get(&c->vib_false_stall_us) / 1000.0;
+    o->vib_stall_timeouts = ctr_get(&c->vib_stall_timeouts);
+    o->vib_write_aborts = ctr_get(&c->vib_write_aborts);
+    o->vib_extra_settles = ctr_get(&c->vib_extra_settles);
+    o->vib_verified_writes = ctr_get(&c->vib_verified_writes);
+    o->vib_verify_rewrites = ctr_get(&c->vib_verify_rewrites);
 }
 
 uint64_t fw_capacity(const fw_t *fw)    { return fw->capacity; }
