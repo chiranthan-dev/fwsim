@@ -1,0 +1,39 @@
+cache_mode
+  cache_mode     randwrite_full/write_through     73.1 IOPS (    73.1 durable)  p50   54.34  p99   75.03 ms
+  cache_mode     randwrite_full/write_back    188.5 IOPS (   147.9 durable)  p50    0.03  p99   70.64 ms
+  cache_mode     randwrite_1g/write_through    159.6 IOPS (   159.6 durable)  p50   24.91  p99   38.66 ms
+  cache_mode     randwrite_1g/write_back    239.7 IOPS (   184.5 durable)  p50    0.03  p99   59.55 ms
+  cache_mode     mixed_hot/write_through    418.8 IOPS (   418.8 durable)  p50    8.93  p99   25.69 ms
+  cache_mode     mixed_hot/write_back      958.1 IOPS (   661.6 durable)  p50    2.24  p99   20.10 ms
+  cache_mode     randread_full/write_through     73.4 IOPS (    73.4 durable)  p50   54.46  p99   76.57 ms
+  cache_mode     randread_full/write_back     74.5 IOPS (    74.5 durable)  p50   53.78  p99   75.27 ms
+  (22.0 s)
+destage_order
+  destage_order  lba_sorted                191.4 IOPS (   148.9 durable)  p50    0.02  p99   66.95 ms
+  destage_order  age_order                  95.1 IOPS (    73.5 durable)  p50    0.01  p99  132.05 ms
+  (9.1 s)
+readahead
+  readahead      on                        766.8 IOPS (   766.8 durable)  p50    1.27  p99    2.92 ms
+  readahead      off                       108.7 IOPS (   108.7 durable)  p50    9.20  p99   11.84 ms
+  (5.8 s)
+queue_micro
+  lockfree_spsc  median 44.77 M items/s (min 29.64, max 50.08)
+  mutex_condvar  median 0.76 M items/s (min 0.71, max 0.77)
+  (29.4 s)
+queue_e2e (queue=lockfree)
+  lockfree/qd1      795.9 K cmds/s  avg 1.01 us  p99 3.61 us
+  lockfree/qd32    3296.2 K cmds/s  avg 9.54 us  p99 58.42 us
+  (0.4 s)
+powerloss (100 trials per mode)
+  wb_noflush     acked/trial   533.6  lost/trial  355.0 (max 383, 100/100 trials)  violations 0  1413.6 IOPS
+  wb_flush       acked/trial   117.1  lost/trial   15.9 (max 31, 99/100 trials)  violations 0  271.0 IOPS
+  wb_fua         acked/trial    92.8  lost/trial    0.0 (max 0, 0/100 trials)  violations 0  183.0 IOPS
+  write_through  acked/trial    95.4  lost/trial    0.0 (max 0, 0/100 trials)  violations 0  181.1 IOPS
+  (62.6 s)
+integrity
+  20000 sectors: 20 transient + 25 persistent flips -> 45 CRC errors, 20 recovered, 25 MEDIUM_ERROR, 0 silent
+  (0.2 s)
+queue_e2e (queue=mutex)
+  mutex/qd1          22.6 K cmds/s  avg 44.02 us  p99 132.62 us
+  mutex/qd32       1313.6 K cmds/s  avg 24.22 us  p99 126.96 us
+  (9.0 s)

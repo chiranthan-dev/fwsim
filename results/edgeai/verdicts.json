@@ -1,0 +1,92 @@
+{
+ "verdicts": [
+  {
+   "mix": "shock",
+   "policy": "P2_ai",
+   "vs": "P1_thr150",
+   "sig": {
+    "corrupt_per_1k_writes": 1,
+    "write_iops": -1,
+    "p99_ms": 1,
+    "false_stall_ms_per_s": 1
+   }
+  },
+  {
+   "mix": "shock",
+   "policy": "P3_hybrid",
+   "vs": "P1_thr150",
+   "sig": {
+    "corrupt_per_1k_writes": 1,
+    "write_iops": -1,
+    "p99_ms": 1,
+    "false_stall_ms_per_s": -1
+   }
+  },
+  {
+   "mix": "vibration",
+   "policy": "P2_ai",
+   "vs": "P1_thr150",
+   "sig": {
+    "corrupt_per_1k_writes": 0,
+    "write_iops": -1,
+    "p99_ms": 0,
+    "false_stall_ms_per_s": 0
+   }
+  },
+  {
+   "mix": "vibration",
+   "policy": "P3_hybrid",
+   "vs": "P1_thr150",
+   "sig": {
+    "corrupt_per_1k_writes": 0,
+    "write_iops": -1,
+    "p99_ms": 0,
+    "false_stall_ms_per_s": -1
+   }
+  },
+  {
+   "mix": "mixed",
+   "policy": "P2_ai",
+   "vs": "P1_thr150",
+   "sig": {
+    "corrupt_per_1k_writes": 1,
+    "write_iops": -1,
+    "p99_ms": 1,
+    "false_stall_ms_per_s": 1
+   }
+  },
+  {
+   "mix": "mixed",
+   "policy": "P3_hybrid",
+   "vs": "P1_thr150",
+   "sig": {
+    "corrupt_per_1k_writes": 1,
+    "write_iops": -1,
+    "p99_ms": 1,
+    "false_stall_ms_per_s": -1
+   }
+  },
+  {
+   "mix": "quiet",
+   "policy": "P2_ai",
+   "vs": "P1_thr150",
+   "sig": {
+    "corrupt_per_1k_writes": 0,
+    "write_iops": -1,
+    "p99_ms": 1,
+    "false_stall_ms_per_s": -1
+   }
+  },
+  {
+   "mix": "quiet",
+   "policy": "P3_hybrid",
+   "vs": "P1_thr150",
+   "sig": {
+    "corrupt_per_1k_writes": 0,
+    "write_iops": -1,
+    "p99_ms": 1,
+    "false_stall_ms_per_s": -1
+   }
+  }
+ ]
+}

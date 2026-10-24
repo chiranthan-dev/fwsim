@@ -1,0 +1,1 @@
+{"window":256,"hop":16,"window_ms":256,"windows_timed":1235,"features_ns":23958,"mlp_ns":260,"tree_ns":16,"mlp_bytes":368,"tree_bytes":180,"tree_nodes":15,"goertzel_mults":5120,"selected":"tree","timing":"host CPU wall clock, not an MCU"}

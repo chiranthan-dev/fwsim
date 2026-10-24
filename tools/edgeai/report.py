@@ -160,6 +160,7 @@ def chart(data, key, ylabel, fname, log=False):
     ax.set_ylabel(ylabel)
     if log:
         ax.set_yscale("symlog", linthresh=0.1)
+        ax.set_ylim(bottom=0)
     ax.grid(axis="y", alpha=0.3)
     ax.spines[["top", "right"]].set_visible(False)
     ax.legend(ncol=7, fontsize=8, frameon=False, loc="upper center", bbox_to_anchor=(0.5, 1.13))
@@ -219,14 +220,19 @@ def detection_section(evals):
 
 
 def mix_section():
-    out = ["\n| bench mix (seeds 5001-5030) | windows | macro-F1 | recall quiet / shock / vibration / tap |",
-           "|---|---|---|---|"]
+    out = ["\n| bench mix (seeds 5001-5030) | windows | accuracy | macro-F1 | recall quiet / shock / vibration / tap "
+           "| shock precision |",
+           "|---|---|---|---|---|---|"]
     for m in MIXES:
         p = os.path.join(R, f"classifier_mix_{m}.json")
         if os.path.exists(p):
             e = json.load(open(p))
-            out.append(f"| {m} | {e['windows']} | {e['macro_f1']:.3f} | "
-                       + " / ".join(f"{r:.3f}" for r in e["recall"]) + " |")
+            out.append(f"| {m} | {e['windows']} | {e['accuracy']:.3f} | {e['macro_f1']:.3f} | "
+                       + " / ".join(f"{r:.3f}" for r in e["recall"]) + f" | {e['precision'][1]:.3f} |")
+    out.append("\nThe quiet mix contains no shocks, so its shock recall and F1 are 0 by definition and "
+               "the 4-class macro-F1 understates it; read accuracy there. On the vibration-heavy mix, "
+               "strong vibration is sometimes called shock (low shock precision), which makes P2 "
+               "inhibit writes during vibration.")
     return out
 
 

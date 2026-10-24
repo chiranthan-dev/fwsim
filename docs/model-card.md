@@ -123,6 +123,15 @@ between integer feature values, so `floor()` is exact).
 - **Shock "afterglow".** A window keeps containing a shock for up to 64 ms after
   it ended, so P2 keeps writes inhibited after the danger has passed (counted
   as needless stall in the benchmark).
+- **Strong vibration called "shock".** On the vibration-heavy benchmark mix,
+  shock precision is 0.37: 643 vibration windows were called shock (out of
+  1,067 shock calls), so P2 inhibits writes during strong vibration.
+- **Measured in the system benchmark** (`results/edgeai/results.md`): with the
+  classifier alone (P2), shock-heavy environments get 29 corrupted sectors
+  per 1,000 writes vs 1.3 for a 250 mg threshold (reaction time); under
+  vibration, P2 beats that threshold (3.3 vs 11.5) but not a 150 mg one, and
+  its verify-after-write costs ~40% of write IOPS there (93 vs 154 for
+  the 250 mg threshold).
 - **Tap vs small shock.** Classes overlap at 280-320 Hz, 400-1500 mg; a hard tap
   can be called a shock (needless inhibit) and a soft high-frequency shock a
   tap (no protection; in this physics, such shocks mostly do little harm).

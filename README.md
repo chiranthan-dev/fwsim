@@ -342,6 +342,229 @@ CRC-32("123456789") = `0xCBF43926` (standard check value 0xCBF43926).
    ones were reported as MEDIUM ERROR at exactly the injected LBA, and there
    were **0 silent corruptions**.
 
+## Edge AI vibration classifier
+
+An on-drive classifier over accelerometer windows that tells a shock from
+sustained rotational vibration from harmless tapping, so the firmware can
+pick a different write-protection response for each - and a measured answer
+to whether that beats a plain threshold. **Short answer: in this model, it
+does not beat a well-chosen threshold on data integrity, and it costs
+throughput; it does beat the default threshold under vibration, and the
+hybrid cuts needless write stalls.** Details and the reasons below.
+
+> **Everything here is synthetic.** The vibration environment, the
+> accelerometer (an invented SPI part, "SIMACC-1"), every register map and
+> every physical constant are illustrative, not measured from a real drive
+> or chassis. Classifier timings are host-CPU wall clock, not MCU timings.
+> The results compare policies *under this model*.
+
+### The problem, and why a threshold is not enough
+
+A head pushed off-track while writing corrupts the sector. Drives protect
+themselves with a shock sensor: above a fixed acceleration threshold, writes
+are inhibited until the disturbance has settled. Two things defeat that:
+
+- **Sustained rotational vibration** (neighbouring drives, fans) moves the
+  head while staying at low amplitude. On the held-out test recordings, a
+  250 mg threshold fired during only **57 of 154 vibration segments**, on
+  **1.6%** of their samples - yet unprotected writes in the vibration-heavy
+  mix corrupted **89 sectors per 1,000 writes**.
+- **Harmless taps** are sharp, high-frequency spikes the arm barely responds
+  to. The same 250 mg threshold tripped on **265 of 948 taps (28%)**; the
+  classifier called **12 of 948 (1.3%)** a shock.
+
+Lowering the threshold catches more vibration but stalls more often;
+raising it does the opposite. The classifier looks at the *shape* of the
+signal instead of one sample's magnitude.
+
+### Pipeline
+
+```mermaid
+flowchart LR
+    ENV["env_sim<br/>synthetic vibration<br/>(4 kHz physics)"] --> ACC["SIMACC-1 accelerometer<br/>1 kHz, 16-bit, FIFO 128<br/>threshold comparator"]
+    ACC -- "SPI0 (MMIO)" --> FIFO["FIFO drain<br/>(bottom half)"]
+    ACC -- "INT pin" --> GPIO["GPIO0 edge"] --> IRQ["IRQ 7 -> ISR<br/>status + timestamp<br/>-> SPSC ring"] --> FIFO
+    FIFO --> FEAT["fixed-point features<br/>RMS, peak, crest, ZCR,<br/>5 Goertzel bands"]
+    FEAT --> NN["int8 MLP 9-16-4<br/>every 16 samples<br/>over 64"]
+    NN --> POL["policy<br/>(write gate)"]
+    IRQ -. "P1 / P3: threshold IRQ" .-> POL
+    POL --> MEDIA["media write path<br/>inhibit / abort-retry<br/>extra settle / verify"]
+    ENV -. "head displacement -> off-track model" .-> MEDIA
+```
+
+| Part | Files |
+|---|---|
+| Peripheral layer | [src/hal/mmio.h](src/hal/mmio.h) (register access, why a dispatch function), [src/hal/irq.h](src/hal/irq.h) (enable/mask/pending, deterministic or threaded delivery), [src/periph/](src/periph/) (SPI controller, GPIO, accelerometer, board memory map), [src/drivers/accel.h](src/drivers/accel.h) (driver + ISR, top half / bottom half) |
+| Physical model (frozen) | [src/periph/env_sim.h](src/periph/env_sim.h), off-track writes in [src/media.c](src/media.c) |
+| Classifier | [src/edgeai/features.h](src/edgeai/features.h), [src/edgeai/infer.h](src/edgeai/infer.h), generated [src/edgeai/model_data.h](src/edgeai/model_data.h), [tools/edgeai/](tools/edgeai/) (CLI, training, export, report) |
+| Policies | [src/env_monitor.h](src/env_monitor.h) |
+| Model card | [docs/model-card.md](docs/model-card.md) |
+| All results | [results/edgeai/results.md](results/edgeai/results.md) |
+
+**Physical model.** Head displacement is a filtered version of the
+acceleration (80 Hz high-pass for the servo's rejection, 120 Hz low-pass for
+the arm's inertia, so ~60-200 Hz matters most and 300+ Hz taps little). A
+sector written at displacement d lands off-track with probability
+Q((15% - d)/3%) + Q((15% + d)/3%), plus a short post-seek settle residual.
+Off-track sectors are stored with a ≤ 32-bit corruption burst, so CRC-32
+always detects them on read: in every benchmark run, **0 silent
+corruptions**. This model was committed with its own tests in `db61be3`
+before any classifier code existed and was not tuned afterwards. (One
+later commit fixed a floating-point hang in the write path's stall
+*limit*, not the physics.)
+
+**Policies** (all selectable by `fw_config_t.vib_policy`, default off):
+
+| | response |
+|---|---|
+| P0 | none |
+| P1 (baseline, no AI) | threshold interrupt -> inhibit writes until 20 ms after the last over-threshold sample; a write already seeking is aborted at the write gate and retried. Default 250 mg (where harm starts in this model: ~210 mg at the displacement filter's peak); the benchmark also sweeps 150 / 500 / 1000 mg |
+| P2 (AI) | classifier every 16 ms over the last 64 ms: shock -> inhibit and retry; vibration -> keep writing with ≥ 1.5 ms post-seek settle and verify-after-write (up to 2 passes); tap / quiet -> nothing |
+| P3 (hybrid) | P1's interrupt for the fast inhibit, P2's vibration response, and an interrupt-triggered inhibit is released early when the classifier calls that window tap or quiet |
+
+P3 was added because P2's reaction time was expected to be too slow for
+shocks; its definition was written down before any system result existed.
+The P1 default was changed from 500 mg to 250 mg, also before any system
+result, after a unit test showed 500 mg leaves a large shock's tail
+unprotected.
+
+### Classifier results (held-out test seeds; [all tables](results/edgeai/results.md))
+
+| window | deployed model | macro-F1 | recall quiet / shock / vibration / tap | bytes | features / inference per window (host CPU) |
+|---|---|---|---|---|---|
+| **64** | **int8 MLP** | **0.950** | 0.984 / 0.965 / 0.984 / 0.990 | 368 | 3.9 µs / 0.28 µs |
+| 128 | tree, depth 3 | 0.917 | 0.969 / 0.865 / 0.974 / 0.951 | 180 | 8.2 µs / 0.01 µs |
+| 256 | tree, depth 3 | 0.929 | 0.943 / 0.901 / 0.988 / 0.939 | 180 | 24.0 µs / 0.02 µs |
+
+- Training data: 200 synthetic 30 s recordings, split **by seed**
+  (train 1-120, validation 121-160, test 161-200), features computed by the
+  C code itself (Python calls `edgeai_cli`). Model and window chosen on
+  validation by a rule fixed before training: the smaller model that meets
+  macro-F1 ≥ 0.85, then the smallest window.
+- **C int8 vs Python float agreement on the test split: 99.86%** (window 64;
+  99.92% / 99.90% for 128 / 256); C int8 vs the bit-exact numpy simulation and
+  C tree vs sklearn: 100%.
+- **Detection latency:** the model flags a shock after **10 ms (p50) / 16 ms
+  (p90)**; the threshold interrupt after 1 / 2 ms. The full window is 64 ms.
+
+![confusion matrices](results/edgeai/classifier_confusion.png)
+
+### System results: P0 vs P1 vs P2 vs P3
+
+Closed-loop random 4 KiB writes at QD 1, write-through, 1 GiB region, 30 s
+of drive time per run, **30 seeds per mix**, every variant on the same
+environment seeds and the same write sequence; corruption is counted by
+reading every block back after a reboot without the environment. Mean ±
+95% CI. Full tables (p99, stall, verify rate): [results/edgeai/results.md](results/edgeai/results.md).
+
+**Corrupted sectors per 1,000 writes** (lower is better)
+
+| mix | P0 none | P1 150 mg | P1 250 mg (default) | P1 500 mg | P2 AI | P3 hybrid |
+|---|---|---|---|---|---|---|
+| shock-heavy | 77.0 ± 8.4 | **0.25 ± 0.16** | 1.27 ± 1.11 | 8.70 ± 5.48 | 29.1 ± 4.5 | 1.76 ± 0.65 |
+| vibration-heavy | 88.7 ± 24.5 | 1.85 ± 0.57 | 11.5 ± 3.1 | 77.5 ± 22.6 | 3.29 ± 1.36 | **1.47 ± 0.71** |
+| mixed | 61.0 ± 16.2 | **0.51 ± 0.21** | 3.64 ± 1.86 | 27.2 ± 12.5 | 14.8 ± 3.0 | 1.10 ± 0.47 |
+| quiet | 3.65 ± 3.62 | 0.16 ± 0.13 | 0.51 ± 0.50 | 3.83 ± 3.87 | 0.11 ± 0.08 | **0.06 ± 0.05** |
+
+**Write IOPS** (drive time; higher is better) and **needless stall** (writes
+held while the environment was actually harmless, ms per second; bold =
+least among the policies shown, which excludes the 500 / 1000 mg thresholds
+that barely protect)
+
+| mix | P0 | P1 150 mg | P1 250 mg | P2 AI | P3 hybrid |
+|---|---|---|---|---|---|
+| shock-heavy | 174 | 163 · 11.0 ms/s | 167 · 5.6 ms/s | 150 · 50.1 ms/s | 157 · **4.6 ms/s** |
+| vibration-heavy | 174 | 132 · 2.7 ms/s | 154 · 1.4 ms/s | 93 · 4.3 ms/s | 90 · **1.0 ms/s** |
+| mixed | 174 | 156 · 10.7 ms/s | 164 · 5.3 ms/s | 128 · 23.2 ms/s | 130 · **4.1 ms/s** |
+| quiet | 174 | 170 · 3.8 ms/s | 172 · 2.0 ms/s | 167 · **0.1 ms/s** | 166 · 1.5 ms/s |
+
+![corruption](results/edgeai/system_corruption.png)
+![IOPS](results/edgeai/system_iops.png)
+
+**What the paired comparisons say** (per-seed differences, significant when
+the 95% CI excludes 0):
+
+- **Shock-heavy: P2 loses to the threshold, clearly** (+27.8 ± 4.6 corrupted
+  sectors per 1k writes vs P1 at 250 mg). A decision every 16 ms over a 64 ms
+  window arrives ~10 ms after the shock started; most of the damage happens
+  in its first 10-30 ms. The threshold interrupt reacts at the next sample.
+  P3, which keeps the interrupt, is level with P1 at 250 mg (+0.5 ± 1.3, not
+  significant) with fewer needless stalls (-0.9 ± 0.3 ms/s), but 10 fewer
+  IOPS (verify-after-write on windows the model calls vibration).
+- **Vibration-heavy: the classifier beats the default threshold** (P2
+  -8.2 ± 3.1, P3 -10.1 ± 2.8 corrupted per 1k vs P1 at 250 mg), because it
+  responds to vibration the threshold does not see. It pays for it:
+  verify-after-write costs one extra revolution (8.3 ms at 7,200 rpm) and ran
+  on ~half of all writes, so IOPS fell from 154 to 93. **Against the best
+  threshold (150 mg) neither P2 (+1.4 ± 1.5) nor P3 (-0.4 ± 1.0) is
+  significantly better on corruption, and both are ~40 IOPS slower.**
+- **Mixed: P2 is worse than either threshold; P3 beats the default threshold
+  (-2.5 ± 1.8) but not the best one (+0.6 ± 0.5, significantly worse).** P3
+  does cut needless stalls by 6.5 ± 1.0 ms/s vs P1 at 150 mg.
+- **Quiet:** everything is close to zero; the AI policies cost 4-6 IOPS.
+
+**Why the AI does not win here, plainly.**
+1. *Reaction time.* Window classification is too slow to protect against
+   shocks. Only the hybrid is competitive on shocks, and it is competitive
+   because of the interrupt, not the model.
+2. *The response is expensive.* Verify-after-write doubles the cost of a write
+   for as long as "vibration" is reported. Stalling only while the signal is
+   over 150 mg - which, in this model, is close to when the head is
+   actually displaced - is cheaper than verifying everything during a
+   vibration episode.
+3. *Situation is not harm.* The classifier predicts what is happening
+   (vibration), not whether it is harmful right now: weak or low-frequency
+   vibration that the servo rejects still triggers verification. And on the
+   vibration-heavy mix strong vibration is sometimes called "shock"
+   (shock precision 0.37), adding stalls.
+4. *The model makes amplitude a good proxy.* In this physics, harm is a band-
+   filtered amplitude, so a low threshold is already a decent harm detector.
+   Real drives, with resonances and multi-axis rotation, may differ; this
+   simulation cannot tell.
+
+What the classifier measurably does buy: it recognises taps (1.3% called
+shock vs 28% tripping the threshold), it lets the hybrid release
+tap-triggered inhibits (fewer needless stalls than the 150 and 250 mg
+thresholds on every mix; the 500 / 1000 mg thresholds stall even less but
+leave 5-60x more corrupted sectors than P3), and
+under vibration it beats the default threshold by a wide margin. Not done,
+to keep the comparison honest after the results were in: tuning the policies
+or the model. Obvious next steps are listed under Future work.
+
+### Run it
+
+```bash
+make test                # includes test_drivers, test_env, test_edgeai, test_policy
+```
+```bash
+make bench-edgeai        # ~10 min on 4 cores: results/edgeai/results.md + PNGs
+```
+```bash
+make nofloat             # features.c / infer.c compile with no FP registers
+```
+```bash
+./build/lockfree/fwsim --workload randwrite --write-through --ops 2000 --time-scale 0 --vib-env mixed --vib-policy hybrid
+```
+
+Retraining needs Python 3 with scikit-learn (`make edgeai-train`, see the
+[Makefile](Makefile)); it regenerates `src/edgeai/model_data.h` and the
+golden test vectors. In the dashboard, pick a vibration environment and a
+policy before pressing Run; the "Vibration monitor" card shows the RMS of
+every classified window coloured by class, threshold interrupts, and the
+policy's counters.
+
+**Feature off = old behaviour.** Every new config field defaults to off. A
+fingerprint of a deterministic workload (the CRC of the whole media file plus
+all counters) is identical to the pre-feature firmware's
+(`tests/test_policy.c`, value computed from commit `acac711`). `make bench`
+was re-run old-vs-new back to back ([docs/baseline-check.md](docs/baseline-check.md)):
+all 50 deterministic metrics identical, the wall-clock ones within
+run-to-run noise - except the lock-free ring micro-benchmark, which runs
+~2.5x *faster* in the new binary although its code is unchanged and it
+never touches the firmware; the hot functions moved by 32 bytes relative to
+the cache line, the most likely cause. The `results/` figures above were not
+regenerated.
+
 ## Examples
 
 These are captures of real runs. [docs/capture.sh](docs/capture.sh) runs
@@ -448,8 +671,9 @@ fw_destroy(fw);
 
 ## Testing
 
-`make test` runs six test programs, twice (once per queue implementation),
-plus five end-to-end CLI runs. `make asan` and `make tsan` run the same
+`make test` runs ten test programs, twice (once per queue implementation),
+plus seven end-to-end CLI runs (two of them with the vibration environment,
+one with the interrupt thread). `make asan` and `make tsan` run the same
 thing under the sanitizers, and both report nothing. I sanity-checked that
 TSan in this environment does catch a deliberately racy program.
 
@@ -461,6 +685,10 @@ TSan in this environment does catch a deliberately racy program.
 | `test_dispatch` | IDENTIFY, invalid opcodes + sense, range/overflow validation, tag collision, all 32 tags in flight, FLUSH, FUA, write-through, SET FEATURES, threshold and forced destage, unsorted destage, read-ahead, clean shutdown persistence |
 | `test_integrity` | persistent flip → retries → MEDIUM_ERROR at the exact LBA, CRC-field flip, reallocation on rewrite, transient flips recovered with zero silent corruption, misdirected write caught |
 | `test_powerloss` | deterministic contracts per mode, torn write is a clean prefix, randomized trials per mode with zero durability violations |
+| `test_drivers` | MMIO decode and bus errors, SPI ID read, register read-back and soft reset, accelerometer FIFO order and overflow, one interrupt per GPIO edge, masked interrupt stays pending, ISR -> SPSC ring -> bottom half (deterministic and threaded) |
+| `test_env` | synthetic environment: determinism, class mixes, harm ordering emerges from the physics, off-track curve; write gate (stall, abort/retry, stall limit incl. a floating-point regression, extra settle, verify-after-write); every off-track sector reads back as MEDIUM ERROR, none silently |
+| `test_edgeai` | Goertzel energy vs a hand-computed sine, RMS / peak / crest / zero crossings on known signals, label rule, C int8 MLP and tree vs Python on golden vectors, deterministic output |
+| `test_policy` | feature off == pre-feature firmware (fingerprint), a write at a real shock's onset under P1 reads back with zero CRC errors, P2 verifies under vibration, P3 releases tap inhibits, trace events, threaded interrupts |
 
 ## Limitations
 
@@ -487,7 +715,23 @@ TSan in this environment does catch a deliberately racy program.
   results (who wins, zero violations, zero silent corruptions) are stable
   across runs.
 
+- **Edge AI: synthetic everything.** The vibration data, the accelerometer
+  and its register map, the GPIO/SPI/IRQ peripherals and the off-track model
+  are inventions with illustrative constants. Single-axis sensing; reads are
+  not affected by vibration; an off-track write damages only its own sector
+  (no adjacent-track squeeze). The classifier never saw real data.
+- **Edge AI: host-CPU timing.** Feature and inference times are wall clock
+  on an x86-64 host, not on a drive's MCU; SPI transfer time is not charged
+  to the simulated clock. Real-time playback (time_scale > 0) needs the host
+  to simulate 1 kHz / time_scale sensor samples per second.
+
 ## Future work
+
+- Edge AI: predict *harm* (displacement now) rather than *situation*, so the
+  vibration response runs only when it pays; try extra settle without
+  verify; verify only above a confidence or band-energy level; a shorter
+  window or streaming features for a faster shock path. All untested here,
+  and each would need to be fixed before re-running the benchmark.
 
 - Rotational-position (SPTF) reordering of queued host commands, reusing
   disk-sim's `disk_estimate_access()`.

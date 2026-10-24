@@ -1,0 +1,24 @@
+cache_mode
+  cache_mode     randwrite_full/write_through     73.2 IOPS (    73.2 durable)  p50   54.14  p99   78.10 ms
+  cache_mode     randwrite_full/write_back    192.0 IOPS (   151.2 durable)  p50    0.05  p99   65.88 ms
+  cache_mode     randwrite_1g/write_through    165.2 IOPS (   165.2 durable)  p50   23.97  p99   37.88 ms
+  cache_mode     randwrite_1g/write_back    250.4 IOPS (   192.2 durable)  p50    0.02  p99   56.75 ms
+  cache_mode     mixed_hot/write_through    429.2 IOPS (   429.2 durable)  p50    8.79  p99   24.55 ms
+  cache_mode     mixed_hot/write_back      993.8 IOPS (   678.4 durable)  p50    2.12  p99   19.25 ms
+  cache_mode     randread_full/write_through     74.9 IOPS (    74.9 durable)  p50   53.32  p99   73.47 ms
+  cache_mode     randread_full/write_back     74.5 IOPS (    74.5 durable)  p50   53.81  p99   74.46 ms
+  (20.9 s)
+queue_micro
+  lockfree_spsc  median 41.03 M items/s (min 40.54, max 44.23)
+  mutex_condvar  median 0.74 M items/s (min 0.73, max 0.76)
+  (29.3 s)
+powerloss (100 trials per mode)
+  wb_noflush     acked/trial   528.2  lost/trial  352.4 (max 383, 100/100 trials)  violations 0  1407.3 IOPS
+  wb_flush       acked/trial   119.5  lost/trial   17.2 (max 32, 99/100 trials)  violations 0  277.1 IOPS
+  wb_fua         acked/trial    92.3  lost/trial    0.0 (max 0, 0/100 trials)  violations 0  180.7 IOPS
+  write_through  acked/trial    94.2  lost/trial    0.0 (max 0, 0/100 trials)  violations 0  178.8 IOPS
+  (60.9 s)
+queue_e2e (queue=mutex)
+  mutex/qd1          20.9 K cmds/s  avg 47.55 us  p99 154.77 us
+  mutex/qd32       1258.2 K cmds/s  avg 25.29 us  p99 148.71 us
+  (9.8 s)

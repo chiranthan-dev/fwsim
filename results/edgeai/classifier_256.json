@@ -1,0 +1,5 @@
+{"window":256,"hop":16,"model":"tree","mix":"train","seeds":"161-200","windows":74400,
+ "confusion":[[29229,267,185,1300],[0,5004,78,470],[0,192,24182,101],[99,704,13,12576]],
+ "recall":[0.9434,0.9013,0.9880,0.9391],"precision":[0.9966,0.8114,0.9887,0.8705],"f1":[0.9693,0.8540,0.9884,0.9035],"macro_f1":0.9288,"accuracy":0.9542,
+ "threshold_mg":250,"shock_events":321,"shock_detected_ai":317,"shock_latency_ai_ms_p50":9,"shock_latency_ai_ms_p90":15,"shock_detected_thr":320,"shock_latency_thr_ms_p50":1,"shock_latency_thr_ms_p90":2,
+ "tap_events":941,"tap_classified_shock":117,"tap_tripped_threshold":262,"vibration_segments":154,"vibration_segments_tripping_threshold":57,"vibration_samples_over_threshold":0.0160}

@@ -1,0 +1,5 @@
+{"window":64,"hop":16,"model":"mlp","mix":"mixed","seeds":"5001-5030","windows":56160,
+ "confusion":[[30863,109,155,271],[1,1749,31,31],[65,238,19598,10],[13,12,1,3013]],
+ "recall":[0.9830,0.9652,0.9843,0.9914],"precision":[0.9974,0.8297,0.9905,0.9062],"f1":[0.9902,0.8923,0.9874,0.9469],"macro_f1":0.9542,"accuracy":0.9833,
+ "threshold_mg":250,"shock_events":285,"shock_detected_ai":283,"shock_latency_ai_ms_p50":11,"shock_latency_ai_ms_p90":16,"shock_detected_thr":284,"shock_latency_thr_ms_p50":1,"shock_latency_thr_ms_p90":2,
+ "tap_events":753,"tap_classified_shock":7,"tap_tripped_threshold":206,"vibration_segments":132,"vibration_segments_tripping_threshold":38,"vibration_samples_over_threshold":0.0129}
