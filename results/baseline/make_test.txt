@@ -1,0 +1,120 @@
+make --no-print-directory QUEUE=lockfree SAN= run-tests
+  test_concurrent_first_use                    ok
+  test_check_value                             ok
+  test_known_vectors                           ok
+  test_table_matches_bitwise                   ok
+  test_incremental                             ok
+  test_detects_every_single_bit_flip           ok
+  test_detects_bursts                          ok
+test_crc: 53 checks, 0 failures
+  test_mutex_init_rejects_zero                 ok
+  test_mutex_empty_full_order                  ok
+  test_mutex_wraparound                        ok
+  test_mutex_timeout                           ok
+  test_mutex_close_wakes_waiter                ok
+  test_mutex_mpmc_threads                      ok
+  test_spsc_init_rejects_bad_capacity          ok
+  test_spsc_empty_full_order                   ok
+  test_spsc_wraparound                         ok
+  test_spsc_counter_overflow                   ok
+  test_spsc_timeout_and_close                  ok
+  test_spsc_threads                            ok
+  test_spsc_publishes_payload                  ok
+test_ring: 15259 checks, 0 failures
+  test_lru_order_and_eviction                  ok
+  test_dirty_entries_are_never_evicted         ok
+  test_overwrite_and_dirty_transitions         ok
+  test_collect_dirty_oldest_first              ok
+  test_remove_and_discard                      ok
+  test_randomized_against_model                ok
+  test_hash_with_strided_lbas                  ok
+test_cache: 58 checks, 0 failures
+  test_identify                                ok
+  test_invalid_opcode_and_sense                ok
+  test_range_validation                        ok
+  test_tags                                    ok
+  test_full_queue_depth                        ok
+  test_write_back_then_flush                   ok
+  test_fua_and_write_through                   ok
+  test_set_features                            ok
+  test_threshold_and_forced_destage            ok
+  test_unsorted_destage_is_also_correct        ok
+  test_read_ahead                              ok
+  test_clean_shutdown_persists                 ok
+  test_trace_events                            ok
+test_dispatch: 840 checks, 0 failures
+  test_persistent_flip_gives_medium_error      ok
+  test_flip_in_crc_field_is_detected           ok
+  test_rewrite_reallocates_bad_sector          ok
+  test_transient_errors_recovered_by_retry     ok
+  test_zero_retries                            ok
+  test_unwritten_sector_corruption_detected    ok
+  test_misdirected_write_detected              ok
+test_integrity: 46 checks, 0 failures
+  test_write_back_without_flush_loses_acked_writes ok
+  test_flush_makes_writes_durable              ok
+  test_fua_and_write_through_never_lose        ok
+  test_torn_write_is_a_clean_prefix            ok
+  test_randomized_trials                       ok
+test_powerloss: 443 checks, 0 failures
+run-tests: QUEUE=lockfree SAN=none: all passed
+make --no-print-directory QUEUE=mutex SAN= run-tests
+  test_concurrent_first_use                    ok
+  test_check_value                             ok
+  test_known_vectors                           ok
+  test_table_matches_bitwise                   ok
+  test_incremental                             ok
+  test_detects_every_single_bit_flip           ok
+  test_detects_bursts                          ok
+test_crc: 53 checks, 0 failures
+  test_mutex_init_rejects_zero                 ok
+  test_mutex_empty_full_order                  ok
+  test_mutex_wraparound                        ok
+  test_mutex_timeout                           ok
+  test_mutex_close_wakes_waiter                ok
+  test_mutex_mpmc_threads                      ok
+  test_spsc_init_rejects_bad_capacity          ok
+  test_spsc_empty_full_order                   ok
+  test_spsc_wraparound                         ok
+  test_spsc_counter_overflow                   ok
+  test_spsc_timeout_and_close                  ok
+  test_spsc_threads                            ok
+  test_spsc_publishes_payload                  ok
+test_ring: 15259 checks, 0 failures
+  test_lru_order_and_eviction                  ok
+  test_dirty_entries_are_never_evicted         ok
+  test_overwrite_and_dirty_transitions         ok
+  test_collect_dirty_oldest_first              ok
+  test_remove_and_discard                      ok
+  test_randomized_against_model                ok
+  test_hash_with_strided_lbas                  ok
+test_cache: 58 checks, 0 failures
+  test_identify                                ok
+  test_invalid_opcode_and_sense                ok
+  test_range_validation                        ok
+  test_tags                                    ok
+  test_full_queue_depth                        ok
+  test_write_back_then_flush                   ok
+  test_fua_and_write_through                   ok
+  test_set_features                            ok
+  test_threshold_and_forced_destage            ok
+  test_unsorted_destage_is_also_correct        ok
+  test_read_ahead                              ok
+  test_clean_shutdown_persists                 ok
+  test_trace_events                            ok
+test_dispatch: 840 checks, 0 failures
+  test_persistent_flip_gives_medium_error      ok
+  test_flip_in_crc_field_is_detected           ok
+  test_rewrite_reallocates_bad_sector          ok
+  test_transient_errors_recovered_by_retry     ok
+  test_zero_retries                            ok
+  test_unwritten_sector_corruption_detected    ok
+  test_misdirected_write_detected              ok
+test_integrity: 46 checks, 0 failures
+  test_write_back_without_flush_loses_acked_writes ok
+  test_flush_makes_writes_durable              ok
+  test_fua_and_write_through_never_lose        ok
+  test_torn_write_is_a_clean_prefix            ok
+  test_randomized_trials                       ok
+test_powerloss: 443 checks, 0 failures
+run-tests: QUEUE=mutex SAN=none: all passed
